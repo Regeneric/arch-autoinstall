@@ -1,0 +1,1251 @@
+#!/bin/bash
+ 
+interactive_mode=false
+config_file=""
+ 
+# Help menu to display script usage
+usage() {
+  echo "Usage: $0 [OPTIONS]"
+  echo "Options:"
+  echo " -h --help          Display this message"
+  echo " -i --interactive   Enable interactive mode"
+  echo " -c --config        Path to onfig file"
+}
+ 
+has_argument() {
+  # if (first argument is in flag=value style and value is not empty) or (second argument is not empty and it's a flag)  
+  [[ ( $1 == *=* && -n ${1#*=} ) || ( -n $2 && $2 != -* ) ]];
+}
+ 
+extract_argument() {
+  echo "${2:-${1#*=}}"
+}
+ 
+handle_flags() {
+  while [[ $# -gt 0 ]]; do
+      case $1 in
+        -h | --help)
+          usage
+          exit 0
+          ;;
+        -i | --interactive)
+          interactive_mode=true
+          ;;
+        -c | --config*)
+          if ! has_argument $@; then
+            echo "Path to config file not provided" >&2
+            usage
+            exit 1
+          fi
+
+          config_file=$(extract_argument $@)
+          shift
+          ;;
+        *)
+          echo "Invalid option: $1" >&2
+          usage
+          exit 1
+          ;; 
+      esac
+      shift     
+  done
+}
+
+handle_flags "$@"
+ 
+
+idate() {
+  date +"[%Y-%m-%d %H:%M:%S]"
+}
+
+# Load default config if custom one is not specified
+echo "$(idate) Loading config file..." | tee install.log
+if [[ -z $config_file ]]; then
+  config_file=./install.config
+  source $config_file
+else
+  source $config_file
+fi
+
+# Check if config file was loaded successfully
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Config file $config_file: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Config file $config_file: FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+# Check if we're in the UEFI mode
+ls /sys/firmware/efi/efivars >commands.log 2>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) System in UEFI mode: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) System in UEFI mode: FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+###############################################################################
+# NETWORK
+###############################################################################
+
+
+# Check if we've got network
+echo
+echo "$(idate) Checking for network..." | tee -a install.log
+
+interfaces=""
+active_int=""
+
+if [[ $interactive_mode = false ]]; then
+  # Priority goes from top to bottom
+  # Top - the least important
+  # Bottom - the most important
+
+  # Exclude all interfaces from the list that are not WiFi - P1
+  if [[ $net_use_wireless = true ]]; then
+    interfaces=$(ip --brief link | awk '$1 !~ "lo|vir|lxd|docker|tail|enp|eth|wwp" {print $1}')
+  fi
+
+  # Exclude all interfaces from the list that are not GSM (it will override wifi settings) - P2
+  if [[ $net_allow_gsm = true ]]; then
+    interfaces=$(ip --brief link | awk '$1 !~ "lo|vir|lxd|docker|tail|enp|eth|wl" {print $1}')
+  fi
+
+  # Exclude all interfaces from the list that are not cable connections - P3
+  if [[ ($net_use_wireless = false && $net_allow_gsm = false) || $net_use_cable = true ]]; then
+    interfaces=$(ip --brief link | awk '$1 !~ "lo|vir|lxd|docker|tail|wl|wwp" {print $1}')
+  fi
+
+  # Check if network interface has been declared in the config file - P4
+  if [[ -n $net_interface ]]; then active_int=$net_interface; fi
+else
+  # Scan all interfaces
+  interfaces=$(ip --brief link | awk '$1 !~ "lo" {print $1}')
+
+  # Ask for wifi SSID and password
+  if [[ $net_use_wireless = true && $net_allow_gsm = false ]]; then
+    read -p "Wifi network SSID: " net_wifi_ssid
+    read -s -p "Wifi network password: " net_wifi_pass
+    echo
+  fi
+fi
+
+
+# If we set interface in the config file, we don't need to go over the rest of them
+if [[ -z $active_int ]]; then  
+  cnt=0
+  for int in $interfaces; do
+    int_status=$(cat /sys/class/net/$int/operstate)
+    if [[ $? -ne 0 ]]; then echo "$(idate) Get $int status: FAILED" | tee -a install.log; fi
+    
+    echo "$cnt) $int: $int_status" | tee -a install.log
+    cnt=$((cnt + 1))
+
+
+    # Try to connect to the wifi network
+    if [[ $net_use_wireless = true && $net_allow_gsm = false ]]; then
+      echo -e "station $int connect ${net_wifi_ssid}\n${net_wifi_pass}" | iwctl >>commands.log 2>>error.log
+      if [[ $? -eq 0 ]]; then
+        echo "$(idate) Connect to WiFi network $net_wifi_ssid using interface $int: SUCCESS" | tee -a install.log
+        active_int=$int
+        int_status=$(cat /sys/class/net/$active_int/operstate)
+        break
+      else
+        echo "$(idate) Connect to WiFi network $net_wifi_ssid using interface $int: FAILED" | tee -a install.log
+      fi
+    fi
+
+
+    # If any interface is up, we don't need to configure it further
+    if [[ $int_status = up && $interactive_mode = false ]]; then
+      active_int=$int
+      break
+    fi
+  done
+fi
+
+
+
+validate_ip_address() {
+  local ip_addr=""
+  # IP address without subnet mask
+  for oct in "$1" "$2" "$3" "$4"; do
+    case $oct in
+      ""|*[!0123456789]*)
+        echo "invalid"
+        exit 1
+    esac
+  done
+  ip_addr="$1.$2.$3.$4"
+
+  # IP address with subnet mask
+  if [[ $# -eq 5 ]]; then
+    for mask in "$5"; do
+      case $mask in
+        ""|*[!0123456789]*)
+          echo "invalid"
+          exit 1
+      esac
+    done
+
+    ip_addr="$1.$2.$3.$4/$5"
+  fi
+
+  if [[ $1 -ge 0 && $1 -le 255 && \
+        $2 -ge 0 && $2 -le 255 && \
+        $3 -ge 0 && $3 -le 255 && \
+        $4 -ge 0 && $4 -le 255 && \
+        $5 -ge 0 && $5 -le 32 ]]
+  then echo "$ip_addr"
+  else echo "invalid"; fi
+}
+
+
+if [[ $interactive_mode = true ]]; then
+  # If interactive mode is enabled, we don't care what's in the config
+  ints=($interfaces)
+
+  # We want to read numbers only
+  user_choice=-1
+  while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#ints[@]} ]]; do
+    read -p "Choose interface: " user_choice
+  done
+
+  active_int=${ints[$user_choice]}
+  int_status=$(cat /sys/class/net/$active_int/operstate)
+fi
+
+
+if [[ $int_status = down ]]; then
+  ints=($interfaces)  # array from var
+  echo "$(idate) No active links detected, configuring..." | tee -a install.log
+
+  if [[ $interactive_mode = true ]]; then
+    ipa=invalid
+    while [[ $ipa = invalid ]]; do
+      IFS='./' read -rp "IP address (CIDR): " a b c d e
+      ipa=$(validate_ip_address $a $b $c $d $e)
+    done
+    net_ip_address=$ipa
+    
+    ipa=invalid
+    while [[ $ipa = invalid ]]; do
+      IFS='./' read -rp "Default gateway: " a b c d
+      ipa=$(validate_ip_address $a $b $c $d)
+    done
+    net_gateway=$ipa
+
+    ipa=invalid
+    while [[ $ipa = invalid ]]; do
+      IFS='./' read -rp "DNS server: " a b c d
+      ipa=$(validate_ip_address $a $b $c $d)
+    done
+    net_nameserver=($ipa)
+  fi
+
+
+  # Add IP address to the interface
+  ip address add $net_ip_address broadcast + dev ${active_int} >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) Add address $net_ip_address to interface ${active_int}: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) Add address $net_ip_address to interface ${active_int}: FAILED" | tee -a install.log
+    exit 1
+  fi
+
+  # Add default gateway
+  ip route add default via $net_gateway >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) Add default gateway $net_gateway via ${active_int}: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) Add default gateway $net_gateway via ${active_int}: FAILED" | tee -a install.log
+    echo "$(idate) [WARNING] Possibly no direct connection to the network" | tee -a install.log
+  fi
+
+  ip link set ${active_int} up >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) Bring link ${active_int} UP: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) Bring link ${active_int} UP: FAILED" | tee -a install.log
+    exit 1
+  fi
+
+
+  # Add DNS servers
+  for dns in ${net_nameservers[@]}; do
+    echo "nameserver $dns" >> /etc/resolv.conf | tee -a install.log
+  done
+
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) Add DNS server $net_nameserver: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) Add DNS server $net_nameserver: FAILED" | tee -a install.log
+    exit 1
+  fi
+fi
+
+
+# Check connection to gateway
+gateway=$(ip route | awk '/default/ {print $3}')
+
+# If we have more than one gateway, we check wich one is reachable
+gateways=($gateway)
+if [[ ${#gateways[@]} -gt 1 ]]; then
+  echo "$(idate) [WARNING] More than one gateway!" | tee -a install.log
+  for gate in ${gateways[@]}; do
+    ping -c 4 $gate >>commands.logs 2>>errors.log
+    if [[ $? -eq 0 ]]; then 
+      # To be changed: break loop on first successfull ping
+      gateway=$gate
+      break 
+    fi
+  done
+else
+  if [[ -n $gateway ]]; then net_gateway=$gateway; fi
+  ping -c 4 $net_gateway >>commands.logs 2>>errors.log
+fi
+
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Route to gateway $net_gateway: SUCCESS" | tee -a install.log
+
+  # Check connection to the internet and DNS resolving
+  ping -c 4 google.com >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) Route to google.com: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) Route to google.com: FAILED" | tee -a install.log
+    exit 1
+  fi
+else
+  echo "$(idate) Route to gateway $net_gateway: FAILED" | tee -a install.log
+  exit 1
+fi
+
+###############################################################################
+# STORAGE
+###############################################################################
+
+echo
+echo "$(idate) Checking for storage..." | tee -a install.log
+
+free_space=100FREE
+
+esp_part=${disk_root}1
+root_part=${disk_root}2
+
+
+create_partition() {
+  echo n      # Create new partition
+  echo        # Partition number (accept default)
+  echo        # First sector (accept deafult)
+  echo $1     # Last sector (partition size)
+  echo $2     # Partition code (eg. EF00, 8300, 8E00 etc.)
+}
+
+format_drive() {
+  free_space=100FREE
+
+  # Clean eventual leftovers
+  # In case there was LVM before
+  ls /dev/mapper/* | xargs -n1 umount -l >>commands.logs 2>>errors.log
+
+  if [[ $1 = STANDARD ]]; then
+    disk=$(pvs | awk -v d="$disk_root" '$1 ~ d {print $2}')
+    yes | vgremove $disk >>commands.logs 2>>errors.log
+    ls $disk_root* | xargs -n1 umount -l >>commands.logs 2>>errors.log
+    wipefs --all --force $disk_root >>commands.logs 2>>errors.log
+
+    disk=$(pvs | awk -v d="$disk_home" '$1 ~ d {print $2}')
+    yes | vgremove $disk >>commands.logs 2>>errors.log
+    ls $disk_home* | xargs -n1 umount -l >>commands.logs 2>>errors.log
+    wipefs --all --force $disk_home >>commands.logs 2>>errors.log
+  fi
+
+  if [[ $1 = LVM ]]; then
+    for drive in ${disk_lvm_root[@]} ${disk_lvm_home[@]}; do
+      disk=$(pvs | awk -v d="$drive" '$1 ~ d {print $2}')
+      yes | vgremove $disk >>commands.logs 2>>errors.log
+      ls $drive* | xargs -n1 umount -l >>commands.logs 2>>errors.log
+      wipefs --all --force $drive >>commands.logs 2>>errors.log
+    done
+  fi
+
+  # In case there was LUKS before
+  disk=$(lsblk | awk '$6 ~ "crypt" {print substr($1,3)}')
+  if [[ -n $disk ]]; then
+    cryptsetup luksClose $disk >>commands.logs 2>>errors.log
+  fi
+
+
+  if [[ $1 = STANDARD ]]; then
+    # Use standard disk partitioning
+    ( 
+      # ESP partition
+      echo o    # Create new partition table
+      echo Y    # Confirm partition table
+      create_partition "$disk_esp_size" EF00
+
+      # root partition
+      if [[ $disk_root_size = $free_space ]]; then 
+        root_size=    # Use 100% of the free space
+      else 
+        root_size=$disk_root_size
+      fi 
+      create_partition "$root_size" 8300
+
+
+      # /home on the same disk
+      if [[ $disk_separate_home = false ]]; then
+        if [[ $disk_home_size = $free_space ]]; then 
+          home_size=    # Use 100% of the free space
+        else 
+          home_size=$disk_home_size
+        fi 
+        create_partition "$home_size" 8300
+      fi
+
+      echo w    # Save changes to disk
+      echo Y    # Confirm changes
+    ) | gdisk $disk_root >>commands.logs 2>>errors.log
+
+    if [[ $? -eq 0 ]]; then
+      echo "$(idate) Standard disk partitioning | $disk_root: SUCCESS" | tee -a install.log
+    else
+      echo "$(idate) Standard disk partitioning | $disk_root: FAILED" | tee -a install.log
+      exit 1
+    fi
+
+    if [[ $disk_separate_home = true ]]; then
+      (
+        # /home on the separate disk
+        echo o
+        echo Y
+
+        if [[ $disk_home_size = $free_space ]]; then 
+          home_size=    # Use 100% of the free space
+        else 
+          home_size=$disk_home_size
+        fi 
+        create_partition "$home_size" 8300
+
+        echo w
+        echo Y
+      ) | gdisk $disk_home >>commands.logs 2>>errors.log
+
+      if [[ $? -eq 0 ]]; then
+        echo "$(idate) Standard disk partitioning | $disk_home: SUCCESS" | tee -a install.log
+      else
+        echo "$(idate) Standard disk partitioning | $disk_home: FAILED" | tee -a install.log
+        exit 1
+      fi
+    fi
+  fi
+
+  if [[ $1 = LVM ]]; then
+    # Use LVM only or LVM + LUKS
+    free=
+
+    for cnt in ${!disk_lvm_root[@]}; do
+      if [[ $cnt -eq 0 ]]; then
+        (
+          # ESP partition on the first disk from root LVM group
+          echo o
+          echo Y
+          create_partition "$disk_esp_size" EF00
+          create_partition "$free" 8E00
+          echo w
+          echo Y
+        ) | gdisk ${disk_lvm_root[0]} >>commands.logs 2>>errors.log
+      else
+        (
+          echo o
+          echo Y
+          create_partition "$free" 8E00
+          echo w
+          echo Y
+        ) | gdisk ${disk_lvm_root[$cnt]} >>commands.logs 2>>errors.log
+      fi
+
+      if [[ $? -eq 0 ]]; then
+        echo "$(idate) LVM disk partitioning | ${disk_lvm_root[$cnt]}: SUCCESS" | tee -a install.log
+      else
+        echo "$(idate) LVM disk partitioning | ${disk_lvm_root[$cnt]}: FAILED" | tee -a install.log
+        exit 1
+      fi
+    done
+
+    for cnt in ${!disk_lvm_home[@]}; do
+      (
+        echo o
+        echo Y
+        create_partition "$free" 8E00
+        echo w
+        echo Y
+      ) | gdisk ${disk_lvm_home[$cnt]} >>commands.logs 2>>errors.log
+
+      if [[ $? -eq 0 ]]; then
+        echo "$(idate) LVM disk partitioning | ${disk_lvm_home[$cnt]}: SUCCESS" | tee -a install.log
+      else
+        echo "$(idate) LVM disk partitioning | ${disk_lvm_home[$cnt]}: FAILED" | tee -a install.log
+        exit 1
+      fi
+    done
+  fi
+}
+
+
+# -- PARTITIONING -- #
+
+# If not in the interactive mode, check only for interfaces defined in the config file
+if [[ $interactive_mode = false ]]; then
+  if [[ $disk_use_lvm = true || $disk_use_luks = true ]]; then
+    disk_root=${disk_lvm_root[0]}
+    esp_part=${disk_root}1
+    root_part=${disk_root}2
+
+    format_drive LVM
+  else
+    format_drive STANDARD
+  fi
+else
+  # Interactive mode
+  # Reset variables
+  disk_use_lvm=false
+  disk_use_luks=false
+  disk_lvm_root=()
+  disk_lvm_home=()
+  
+  # We want Y/N only
+  answer=-1
+  while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+    read -p "Do you want to use LVM? (Y/N): " answer
+  done
+  if [[ ${answer,,} =~ ^y(es)?$ ]]; then disk_use_lvm=true; fi
+  
+  answer=-1
+  while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+    read -p "Do you want to use LUKS? (Y/N): " answer
+  done
+  if [[ ${answer,,} =~ ^y(es)?$ ]]; then 
+    if [[ $disk_use_lvm = false ]]; then
+      echo "$(idate) [WARNING] LUKS supported only in the LVM mode!" | tee -a install.log
+      echo "$(idate) LVM mode has been enabled." | tee -a install.log
+      disk_use_lvm=true 
+    fi
+    
+    disk_use_luks=true
+  fi
+
+
+  # We want to read numbers only
+  user_choice=-1
+  while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 ]]; do
+    read -p "Choose ESP size (MiB): " user_choice
+  done
+
+  disk_esp_size="${user_choice}M"
+  
+
+  # Show all drives
+  models=($(fdisk -l | awk '$2 ~ "model" {print $3" "$4" "$5}'))
+  if [[ $? -ne 0 || -z $models ]]; then
+    echo "$(idate) [WARNING] Cannot get drive model!" | tee -a install.log
+  fi
+
+  sizes=($(fdisk -l | awk '($4 ~ "GiB" || $4 ~ "MiB") && $2 !~ "loop|mapper" {print $3" "$4}'))
+  if [[ $? -ne 0 || -z $sizes ]]; then
+    echo "$(idate) [WARNING] Cannot get drive size!" | tee -a install.log
+  fi
+  
+  drives=($(lsblk | awk '$1 !~ "NAME|-" && $1 !~ /[0-9]/ && $6 !~ "lvm|crypt" {print $1}'))
+  if [[ $? -ne 0 || -z $drives ]]; then
+    echo "$(idate) Get list of all drives: FAILED" | tee -a install.log
+    exit 1
+  fi  
+
+  cnt=0
+  size_cnt=0
+  for drive in ${drives[@]}; do
+    printf "%d) " "$cnt" | tee -a install.log
+    for model in ${models[@]}; do
+      printf "%s " "$model" | tee -a install.log
+    done
+
+    printf "| %s %s | " "${sizes[$size_cnt]}" "${sizes[$((size_cnt + 1))]}" | tee -a install.log
+    printf "%s\n" "$drive" | tee -a install.log
+
+    cnt=$((cnt + 1))
+    size_cnt=$((size_cnt + 2))
+  done
+
+
+  # We want to read numbers only
+  user_choice=-1
+  if [[ $disk_use_lvm = false ]]; then
+    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; do
+      read -p "Choose root drive: " user_choice
+    done
+
+    disk_root="/dev/${drives[$user_choice]}"
+  else
+    while read -p "Choose root drives (Enter to continue): " user_choice; do
+      # Catch empty string and invalid input
+      if [[ -z $user_choice && ${#disk_lvm_root[@]} -gt 0 ]]; then
+        break
+      elif [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; then
+        continue
+      else
+        # Add drive to LVM group
+        disk_lvm_root+=(/dev/${drives[$user_choice]})
+      fi
+    done
+
+    disk_root=${disk_lvm_root[0]}
+    esp_part=${disk_root}1
+    root_part=${disk_root}2
+  fi
+
+
+  if [[ $disk_use_lvm = false ]]; then
+    # We want to read numbers only
+    user_choice=-1
+    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 ]]; do
+      read -p "Choose root size (GiB or 0 for 100%FREE): " user_choice
+    done
+
+    if [[ user_choice -eq 0 ]]; then
+      disk_root_size=100FREE   # Use 100% of free space
+    else
+      disk_root_size="${user_choice}G"
+    fi
+
+    # We want Y/N only
+    answer=-1
+    while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+      read -p "Use separate drive for /home? (Y/N): " answer
+    done
+    if [[ ${answer,,} =~ ^y(es)?$ ]]; then 
+      disk_separate_home=true 
+    else
+      disk_separate_home=false
+    fi
+  fi
+
+  if [[ $disk_separate_home = true || $disk_use_lvm = true ]]; then
+    if [[ $disk_use_lvm = false ]]; then
+      # We want to read numbers only
+      user_choice=-1
+      while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; do
+        read -p "Choose /home drive: " user_choice
+      done
+
+      disk_home="/dev/${drives[$user_choice]}"
+    else
+      while read -p "Choose /home drives (Enter to continue): " user_choice; do
+        # Catch empty string and invalid input
+        if [[ -z $user_choice && ${#disk_lvm_home[@]} -gt 0 ]]; then
+          break
+        elif [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; then
+          continue
+        else
+          # Add drive to LVM group
+          disk_lvm_home+=(/dev/${drives[$user_choice]})
+        fi
+      done
+    fi
+  fi
+
+  if [[ $disk_use_lvm = false ]]; then
+    # We want to read numbers only
+    user_choice=-1
+    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 ]]; do
+      read -p "Choose /home size (GiB or 0 for 100%FREE): " user_choice
+    done
+
+    if [[ user_choice -eq 0 ]]; then
+      disk_home_size=100FREE   # Use 100% of free space
+    else
+      disk_home_size="${user_choice}G"
+    fi
+
+    format_drive STANDARD
+  fi
+
+  if [[ $disk_use_lvm = true ]]; then format_drive LVM; fi
+fi
+
+
+# -- FORMATING -- #
+
+esp_part=${disk_root}1
+
+# ESP partition
+ls $esp_part | xargs -n1 umount -l >>commands.logs 2>>errors.log
+wipefs --force --all $esp_part >>commands.log 2>>error.log
+yes | mkfs.vfat $esp_part >>commands.logs 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) ESP partition standard format (vfat): SUCCESS" | tee -a install.log
+else
+  echo "$(idate) ESP partition standard format (vfat): FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+# LVM partitions
+if [[ $disk_use_lvm = true ]]; then
+  drives_root=()
+  drives_home=()
+  ls /dev/mapper/* | xargs -n1 umount -l >>commands.logs 2>>errors.log 
+
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose root group name (eg. root): " disk_lvm_root_group
+    read -p "Choose home group name (eg. home): " disk_lvm_home_group
+  fi
+
+  # Clean any potential leftovers
+  lvm_vg=()
+  for disk in ${disk_lvm_root[@]}; do
+    group=$(pvs | awk -v d="$disk" '$1 ~ d {print $2}') 
+    lvm_vg+=($group)
+  done
+
+  for disk in ${disk_lvm_home[@]}; do
+    group=$(pvs | awk -v d="$disk" '$1 ~ d {print $2}')
+    lvm_vg+=($group)
+  done
+
+  for vg in ${lvm_vg[@]}; do
+    yes | vgremove $vg >>commands.logs 2>>errors.log
+  done
+
+  # In case there was LUKS before
+  disk=$(lsblk | awk '$6 ~ "crypt" {print substr($1,3)}')
+  cryptsetup luksClose $disk >>commands.logs 2>>errors.log
+
+
+  for cnt in ${!disk_lvm_root[@]}; do
+    # Partition on the drive with ESP
+    if [[ $cnt -eq 0 ]]; then
+      drives_root+=(${disk_lvm_root[$cnt]}2)
+      yes | pvcreate ${disk_lvm_root[$cnt]}2 >>commands.logs 2>>errors.log
+    fi
+
+    # Every next root partition
+    if [[ $cnt -gt 0 && ${#disk_lvm_root[@]} -gt 1 ]]; then
+      drives_root+=(${disk_lvm_root[$cnt]}1)
+      yes | pvcreate ${disk_lvm_root[$cnt]}1 >>commands.logs 2>>errors.log
+    fi
+
+    if [[ $? -eq 0 ]]; then
+      echo "$(idate) LVM Physical Volume (${drives_root[$cnt]}) create: SUCCESS" | tee -a install.log
+    else
+      echo "$(idate) LVM Physical Volume (${drives_root[$cnt]}) create: FAILED" | tee -a install.log
+      exit 1
+    fi
+  done
+
+  for cnt in ${!disk_lvm_home[@]}; do
+    drives_home+=(${disk_lvm_home[$cnt]}1)
+    yes | pvcreate ${disk_lvm_home[$cnt]}1 >>commands.logs 2>>errors.log
+    if [[ $? -eq 0 ]]; then
+      echo "$(idate) LVM Physical Volume (${drives_home[$cnt]}) create: SUCCESS" | tee -a install.log
+    else
+      echo "$(idate) LVM Physical Volume (${drives_home[$cnt]}) create: FAILED" | tee -a install.log
+      exit 1
+    fi
+  done
+
+  # Root LVM group
+  yes | vgcreate $disk_lvm_root_group ${drives_root[@]} >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) LVM Volume Group ($disk_lvm_root_group) create: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) LVM Volume Group ($disk_lvm_root_group) create: FAILED" | tee -a install.log
+    exit 1
+  fi
+
+  # Home LVM group
+  yes | vgcreate $disk_lvm_home_group ${drives_home[@]} >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) LVM Volume Group ($disk_lvm_home_group) create: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) LVM Volume Group ($disk_lvm_home_group) create: FAILED" | tee -a install.log
+    exit 1
+  fi
+
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose root volume name (eg. proot): " disk_lvm_root_volume
+    read -p "Choose home volume name (eg. phome): " disk_lvm_home_volume
+  fi
+
+  # Root logical volume
+  yes | lvcreate -l 100%FREE -n $disk_lvm_root_volume $disk_lvm_root_group >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) LVM Logical Volume ($disk_lvm_root_volume) create: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) LVM Logical Volume ($disk_lvm_root_volume) create: FAILED" | tee -a install.log
+    exit 1
+  fi
+
+  # Home logical volume
+  yes | lvcreate -l 100%FREE -n $disk_lvm_home_volume $disk_lvm_home_group >>commands.logs 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) LVM Logical Volume ($disk_lvm_home_volume) create: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) LVM Logical Volume ($disk_lvm_home_volume) create: FAILED" | tee -a install.log
+    exit 1
+  fi
+fi
+
+
+if [[ $disk_use_lvm = false ]]; then
+  type=standard
+  root_part=${disk_root}2
+
+  if [[ $disk_separate_home = true ]]; then
+    if [[ ${disk_root} =~ /nvme/ ]]; then
+      home_part=${disk_home}p1  # First partition on separate /home drive (NVMe)
+    else
+      home_part=${disk_home}1   # First partition on separate /home drive (SATA)
+    fi
+  else 
+    if [[ ${disk_root} =~ /nvme/ ]]; then
+      home_part=${disk_root}p3  # First partition on separate /home drive (NVMe)
+    else
+      home_part=${disk_root}3   # Third partition on root drive (SATA)
+    fi
+  fi
+else
+  type=LVM
+  root_part=/dev/$disk_lvm_root_group/$disk_lvm_root_volume
+  home_part=/dev/$disk_lvm_home_group/$disk_lvm_home_volume
+
+  # Disk encryption
+  if [[ $disk_use_luks = true ]]; then
+    if [[ $interactive_mode = true ]]; then 
+      read -s -p "Choose encryption password: " disk_luks_pass
+      echo
+      read -p "Choose LUKS root partition name (eg. cryptroot): " disk_luks_root_name
+    fi
+
+    echo $disk_luks_pass | cryptsetup -q luksFormat --type luks2 $root_part
+    
+    if [[ $? -eq 0 ]]; then
+      echo "$(idate) Encrypted partition ($root_part) create: SUCCESS" | tee -a install.log
+    else
+      echo "$(idate) Encrypted partition ($root_part) create: FAILED" | tee -a install.log
+      exit 1
+    fi
+
+    echo $disk_luks_pass | cryptsetup luksOpen $root_part $disk_luks_root_name
+    root_part=/dev/mapper/$disk_luks_root_name
+    if [[ $? -eq 0 ]]; then
+      echo "$(idate) Decrypt partition ($root_part) and ready it to mount: SUCCESS" | tee -a install.log
+    else
+      echo "$(idate) Decrypt partition ($root_part) and ready it to mount: FAILED" | tee -a install.log
+      exit 1
+    fi
+  fi
+fi
+
+
+if [[ $interactive_mode = true ]]; then
+  read -p "Choose root filesystem (ext4, xfs, btrfs etc.): " disk_root_fs
+  read -p "Choose /home filesystem (ext4, xfs, btrfs etc.): " disk_home_fs
+fi
+
+# Root partition
+ls $root_part | xargs -n1 umount -l >>commands.logs 2>>errors.log
+yes | mkfs.$disk_root_fs $root_part >>commands.logs 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Root partition ($root_part) $type format ($disk_root_fs): SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Root partition ($root_part) $type format ($disk_root_fs): FAILED" | tee -a install.log
+  exit 1
+fi
+
+# /home partition
+ls $home_part | xargs -n1 umount -l >>commands.logs 2>>errors.log
+yes | mkfs.$disk_home_fs $home_part >>commands.logs 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Home partition ($home_part) $type format ($disk_home_fs): SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Home partition ($home_part) $type format ($disk_home_fs): FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+# -- MOUNT PARTITIONS -- #
+
+# Mount root partition
+mount $root_part /mnt
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Root partition ($root_part) mount: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Root partition ($root_part) mount: FAILED" | tee -a install.log
+  exit 1
+fi
+
+# Mount boot partition
+mkdir /mnt/boot
+mount $esp_part /mnt/boot
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Boot partition ($esp_part) mount: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Boot partition ($esp_part) mount: FAILED" | tee -a install.log
+  exit 1
+fi
+
+# Mount home partition
+mkdir /mnt/home
+mount $home_part /mnt/home
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Home partition ($home_part) mount: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Home partition ($home_part) mount: FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+###############################################################################
+# BASE SYSTEM
+###############################################################################
+
+
+echo
+echo "$(idate) Checking for packages..." | tee -a install.log
+
+# Download base of the system
+if [[ $interactive_mode = true ]]; then
+  read -p "Choose kernel (eg. default | zen, vfio, lts etc.): " os_kernel 
+  if [[ -z $os_kernel ]]; then os_kernel=default; fi
+fi
+
+if [[ $os_kernel = default ]]; then
+  pacstrap /mnt base base-devel linux linux-firmware linux-headers dhcpcd vim git 2>>errors.log
+else
+  pacstrap /mnt base base-devel linux-$os_kernel linux-firmware linux-$os_kernel-headers dhcpcd vim git 2>>errors.log
+fi
+
+if [[ $oc_cpu = amd ]]; then
+  pacstrap /mnt amd-ucode 2>>errors.log
+fi
+
+if [[ $os_cpu = intel ]]; then
+  pacstrap /mnt intel-ucode 2>>errors.log
+fi
+
+
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) Download base packages: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) Download base packages: FAILED" | tee -a install.log
+  exit 1
+fi
+
+# Generate fstab using UUID
+genfstab -U /mnt > /mnt/etc/fstab
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) UUID fstab generation: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) UUID fstab generation: FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+# -- INSIDE THE OS -- #
+
+if [[ $disk_use_lvm = true ]]; then
+  if [[ $disk_use_luks = true ]]; then hooks="lvm2 encrypt"
+  else hooks="lvm2"; fi
+
+  pacstrap /mnt lvm2 2>>errors.log
+  arch-chroot /mnt /bin/bash -c "sed -i 's/\(HOOKS=(.*\)block\(.*\))/\1block ${hooks}\2)/' /etc/mkinitcpio.conf" 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) [CHROOT] Add hooks (${hooks[@]}) to mkinitcpio.conf: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) [CHROOT] Add hooks (${hooks[@]}) to mkinitcpio.conf]: FAILED" | tee -a install.log
+    exit 1
+  fi
+
+  if [[ $os_kernel = default ]]; then
+    arch-chroot /mnt /bin/bash -c "mkinitcpio -p linux" 2>>errors.log
+  else
+    arch-chroot /mnt /bin/bash -c "mkinitcpio -p linux-$os_kernel" 2>>errors.log
+  fi
+
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) [CHROOT] Create initial ramdisk: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) [CHROOT] Create initial ramdisk: FAILED" | tee -a install.log
+    exit 1
+  fi
+fi
+
+
+# Enable DHCP
+arch-chroot /mnt /bin/bash -c "systemctl enable dhcpcd" 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) [CHROOT] Enable DHCP daemon (dhcpcd): SUCCESS" | tee -a install.log
+else
+  echo "$(idate) [CHROOT] Enable DHCP daemon (dhcpcd): FAILED" | tee -a install.log
+fi
+
+# Timezone settings
+if [[ $interactive_mode = true ]]; then
+  read -p "Choose timezone (eg. Europe/Warsaw): " os_timezone
+fi
+
+arch-chroot /mnt /bin/bash -c "ln -sf /usr/share/zoneinfo/$os_timezone /etc/localtime" 2>>errors.log
+arch-chroot /mnt /bin/bash -c "hwclock --systohc" 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) [CHROOT] Timezone ($os_timezone) set: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) [CHROOT] Timezone ($os_timezone) set: FAILED" | tee -a install.log
+fi
+
+# Locale settings
+if [[ $interactive_mode = true ]]; then
+  read -p "Choose system locale (eg. en_US.UTF-8): " os_locale
+fi
+
+arch-chroot /mnt /bin/bash -c "sed -i 's/^#${os_locale}\(.*\)$/${os_locale}\1/' /etc/locale.gen" 2>>errors.log
+arch-chroot /mnt /bin/bash -c "locale-gen" 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) [CHROOT] Locale ($os_locale) generation: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) [CHROOT] Locale ($os_locale) generation: FAILED" | tee -a install.log
+fi
+
+arch-chroot /mnt /bin/bash -c "echo 'LANG=$os_locale' > /etc/locale.conf" 2>>errors.log
+
+# Hostname
+if [[ $interactive_mode = true ]]; then
+  read -p "Choose hostname: " os_hostname
+fi
+
+arch-chroot /mnt /bin/bash -c "echo '${os_hostname}' > /etc/hostname" 2>>errors.log
+arch-chroot /mnt /bin/bash -c "echo '127.0.0.1 ${os_hostname}.localdomain ${os_hostname}' >> /etc/hosts" 2>>errors.log
+
+echo "$(idate) [CHROOT] Hostname $os_hostname assigned to this machine" | tee -a install.log
+
+# Root password
+if [[ $interactive_mode = true ]]; then
+  read -s -p "Choose root password: " os_root_pass
+  echo
+fi
+
+arch-chroot /mnt /bin/bash -c "echo 'root:${os_root_pass}' | chpasswd" 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) [CHROOT] Root password set: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) [CHROOT] Root password set: FAILED" | tee -a install.log
+  exit 1
+fi
+
+
+# User account
+if [[ $interactive_mode = true ]]; then
+  read -p "Choose user name: " os_user_name
+  read -s -p "Choose user password: " os_user_pass
+  echo
+  read -p "Choose user groups (default: users): " os_user_groups
+fi
+
+if [[ -n $os_user_name ]]; then
+  # Create user
+  if [[ -z $os_user_groups ]]; then os_user_groups=users; fi
+
+  if [[ $os_user_groups == *sudo* ]]; then
+    arch-chroot /mnt /bin/bash -c "groupadd sudo" >>commands.logs 2>>errors.log
+    arch-chroot /mnt /bin/bash -c "sed -i '/^# %sudo/s/^# //' /etc/sudoers" >>commands.log 2>>errors.log
+  fi
+
+  arch-chroot /mnt /bin/bash -c "useradd -mG $os_user_groups -s /bin/bash $os_user_name" >>commands.log 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) [CHROOT] User ($os_user_name) acount create: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) [CHROOT] User ($os_user_name) acount create: FAILED" | tee -a install.log
+  fi
+
+  if [[ $? -eq 0 ]]; then
+    # Set user's password only if account was created successfully
+    arch-chroot /mnt /bin/bash -c "echo '${os_user_name}:${os_user_pass}' | chpasswd" 2>>errors.log
+    if [[ $? -eq 0 ]]; then
+      echo "$(idate) [CHROOT] ${os_user_name} password set: SUCCESS" | tee -a install.log
+    else
+      echo "$(idate) [CHROOT] ${os_user_name} password set: FAILED" | tee -a install.log
+    fi
+  fi
+fi
+
+
+# Bootloader
+arch-chroot /mnt /bin/bash -c "bootctl install" 2>>errors.log
+if [[ $? -eq 0 ]]; then
+  echo "$(idate) [CHROOT] Bootloader install: SUCCESS" | tee -a install.log
+else
+  echo "$(idate) [CHROOT] Bootloader install: FAILED" | tee -a install.log
+  exit 1
+fi
+
+arch-chroot /mnt /bin/bash -c "echo 'default arch' > /boot/loader/loader.conf" 2>>errors.log
+arch-chroot /mnt /bin/bash -c "echo 'title Arch Linux' > /boot/loader/entries/arch.conf" 2>>errors.log
+if [[ $os_kernel = default ]]; then
+  arch-chroot /mnt /bin/bash -c "echo 'linux /vmlinuz-linux' >> /boot/loader/entries/arch.conf" 2>>errors.log
+  arch-chroot /mnt /bin/bash -c "echo 'initrd /initramfs-linux.img' >> /boot/loader/entries/arch.conf" 2>>errors.log
+else
+  arch-chroot /mnt /bin/bash -c "echo 'linux /vmlinuz-linux-${os_kernel}' >> /boot/loader/entries/arch.conf" 2>>errors.log
+  arch-chroot /mnt /bin/bash -c "echo 'initrd /initramfs-linux-${os_kernel}.img' >> /boot/loader/entries/arch.conf" 2>>errors.log
+fi
+
+# intel-ucode
+if [[ $os_cpu = amd ]]; then
+  arch-chroot /mnt /bin/bash -c "echo 'initrd /amd-ucode.img' >> /boot/loader/entries/arch.conf" 2>>errors.log
+fi
+
+# amd-ucode
+if [[ $os_cpu = intel ]]; then
+  arch-chroot /mnt /bin/bash -c "echo 'initrd /intel-ucode.img' >> /boot/loader/entries/arch.conf" 2>>errors.log
+fi
+
+if [[ $disk_use_lvm = true ]]; then
+  if [[ $disk_use_luks = true ]]; then
+    luks_drive_uuid=$(arch-chroot )
+    arch-chroot /mnt /bin/bash -c "echo 'options cryptdevice=UUID=$(blkid /dev/${disk_lvm_root_group}/${disk_lvm_root_volume} | awk -F '["]' '{print $2}'):${disk_luks_root_name} root=/dev/mapper/${disk_luks_root_name} rw' >> /boot/loader/entries/arch.conf" 2>>errors.log
+  else
+    arch-chroot /mnt /bin/bash -c "echo 'options root=/dev/mapper/${disk_lvm_root_group}-${disk_lvm_root_volume} rw' >> /boot/loader/entries/arch.conf" 2>>errors.log
+  fi
+else 
+  # Standard partition schema bootloader config
+  arch-chroot /mnt /bin/bash -c "echo 'options root=UUID=$(blkid $root_part | awk -F '["]' '{print $2}') rw' >> /boot/loader/entries/arch.conf" 2>>errors.log
+fi
+
+
+echo "$(idate) [CHROOT] Bootloader config done." | tee -a install.log
+
+
+if [[ $interactive_mode = true ]]; then
+  answer=-1
+  while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+    read -p "Do you want to install Xorg? (Y/N): " answer
+  done
+  if [[ ${answer,,} =~ ^y(es)?$ ]]; then os_install_xorg=true; fi
+
+  if [[ $os_install_xorg = true ]]; then
+    answer=-1
+    while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+      read -p "Do you want to install Desktop Environment? (Y/N): " answer
+    done
+    if [[ ${answer,,} =~ ^y(es)?$ ]]; then
+      read -p "Choose DE to install (eg. plasma, gnome, xfce): " os_desktop
+    fi
+  fi
+
+  read -p "Choose shell to install (eg. bash, zsh, fish): " os_shell
+fi
+
+
+# -- SHELL -- #
+if [[ -n $os_shell ]]; then
+  shell_flag=false
+  case $os_shell in
+    "bash")
+      echo "$(idate) $os_shell already installed" | tee -a install.log
+      shell_flag=false
+      ;;
+    "zsh")
+      pacstrap /mnt $os_shell 2>>errors.log
+      shell_flag=true
+      ;;
+    "fish")
+      pacstrap /mnt $os_shell lynx 2>>errors.log
+      shell_flag=true
+      ;;
+    *)
+      echo "$(idate) $os_shell install: FAILED" | tee -a install.log
+      shell_flag=false
+      ;;
+  esac
+
+
+  if [[ $shell_flag = true ]]; then
+    arch-chroot /mnt /bin/bash -c "usermod --shell /bin/${os_shell} root" 2>>errors.log
+    if [[ -n $os_user_name ]]; then
+      arch-chroot /mnt /bin/bash -c "usermod --shell /bin/${os_shell} ${os_user_name}" 2>>errors.log
+    fi
+  fi
+
+
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) $os_shell install: SUCCESS" | tee -a install.log
+  else
+    echo "$(idate) $os_shell install: FAILED" | tee -a install.log
+  fi
+  echo "$(idate) ADDITIONAL SHELL CONFIGURATION MAY BE NEEDED" | tee -a install.log
+fi
+
+
+# -- DESKTOP ENV -- #
+if [[ $os_install_xorg = true || -n $os_desktop ]]; then
+  pacstrap /mnt xorg xorg-xinit xterm 2>>errors.log
+  if [[ $? -eq 0 ]]; then
+    echo "Xorg install: SUCCESS"
+  else
+    echo "Xorg install: FAILED"
+    exit 1
+  fi
+
+  case $os_desktop in
+    "plasma")
+      pacstrap /mnt plasma plasma-wayland-session kde-applications 2>>errors.log
+      de=Plasma
+      dm=SDDM 
+      ;;
+    "gnome") 
+      pacstrap /mnt gnome gnome-shell-extensions 2>>errors.log
+      de=GNOME
+      dm=GDM
+      ;;
+    "xfce") 
+      pacstrap /mnt xfce4 xfce4-goodies sddm 2>>errors.log
+      de=XFCE
+      dm=SDDM
+      ;;
+    *) 
+      echo "$(idate) Desktop Environment install: FAILED" | tee -a install.log 
+      ;;
+  esac
+
+  if [[ $? -eq 0 ]]; then
+    echo "$(idate) $de install: SUCCESS" | tee -a install.log
+    echo "$(idate) REMEMBER TO ENABLE $dm AFTER REBOOT (systemctl enable --now ${dm,,})" | tee -a install.log
+  else
+    echo "$(idate) $de install: FAILED" | tee -a install.log
+    exit 1
+  fi
+  echo "$(idate) INSTALLING ADDITIONAL VIDEO DRIVERS MAY BE NEEDED" | tee -a install.log
+fi
+
+
+logs_dir="arch-install-logs"
+mkdir /mnt/root/"$logs_dir"
+cp *.log /mnt/root/"$logs_dir"/
+
+answer=-1
+while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+  echo "Install logs are located in /root/$logs_dir/"
+  read -p "Do you want to reboot now? (Y/N): " answer
+done
+
+if [[ ${answer,,} =~ ^y(es)?$ ]]; then 
+  sync >>commands.logs 2>>errors.log
+
+  umount /mnt/boot >>commands.logs 2>>errors.log
+  umount /mnt/home >>commands.logs 2>>errors.log
+  umount /mnt >>commands.logs 2>>errors.log
+
+  reboot >>commands.logs 2>>errors.log
+else sync >>commands.logs 2>>errors.log; fi
