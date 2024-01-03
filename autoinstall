@@ -2,52 +2,41 @@
  
 interactive_mode=false
 config_file=""
- 
-# Help menu to display script usage
+
 usage() {
   echo "Usage: $0 [OPTIONS]"
   echo "Options:"
   echo " -h --help          Display this message"
   echo " -i --interactive   Enable interactive mode"
-  echo " -c --config        Path to onfig file"
+  echo " --config=file      Path to onfig file"
 }
- 
-has_argument() {
-  # if (first argument is in flag=value style and value is not empty) or (second argument is not empty and it's a flag)  
-  [[ ( $1 == *=* && -n ${1#*=} ) || ( -n $2 && $2 != -* ) ]];
-}
- 
-extract_argument() {
-  echo "${2:-${1#*=}}"
-}
- 
+
 handle_flags() {
   while [[ $# -gt 0 ]]; do
-      case $1 in
-        -h | --help)
-          usage
-          exit 0
-          ;;
-        -i | --interactive)
-          interactive_mode=true
-          ;;
-        -c | --config*)
-          if ! has_argument $@; then
-            echo "Path to config file not provided" >&2
-            usage
-            exit 1
-          fi
-
-          config_file=$(extract_argument $@)
-          shift
-          ;;
-        *)
-          echo "Invalid option: $1" >&2
+    case $1 in
+      -h | --help)
+        usage
+        exit 1
+        ;;
+      -i | --interactive)
+        interactive_mode=true
+        shift
+        ;;
+      --config*)
+        if ! [[ $1 == *=* && -n ${1#*=} ]]; then
+          echo "No config file provided" >&2
           usage
           exit 1
-          ;; 
-      esac
-      shift     
+        fi
+
+        config_file=${1#*=}
+        shift
+        ;;
+      *)
+        usage
+        exit 1
+        ;;
+    esac
   done
 }
 
@@ -57,6 +46,7 @@ handle_flags "$@"
 idate() {
   date +"[%Y-%m-%d %H:%M:%S]"
 }
+
 
 # Load default config if custom one is not specified
 echo "$(idate) Loading config file..." | tee install.log
