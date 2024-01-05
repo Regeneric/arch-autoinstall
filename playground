@@ -1,6 +1,7 @@
 #!/usr/bin/bash
 
 interactive_mode=false
+export disk_separate_home=""
 
 # And also variables from config file 
 
@@ -344,36 +345,32 @@ disk_clean_drive() {
   local disk=""
   if [[ $1 = "STANDARD" ]]; then
     disk=$(pvs | awk -v d="$disk_root" '$1 ~ d {print $2}')
-    if [[ -n $disk ]]; then
-      yes | vgremove $disk 2>> errors.log
-    fi
+    yes | vgremove $disk >> commands.log 2>> errors.log
 
     ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_root >> commands.log 2>> errors.log
 
 
     disk=$(pvs | awk -v d="$disk_home" '$1 ~ d {print $2}')
-    if [[ -n $disk ]]; then
-      yes | vgremove $disk 2>> errors.log
-    fi
+    yes | vgremove $disk >> commands.log 2>> errors.log
 
     ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_home >> commands.log 2>> errors.log
   fi
+
 
   if [[ $1 = "LVM" ]]; then
     ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
 
     for drive in ${disk_lvm_root[@]} ${disk_lvm_home[@]}; do
       disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
-      if [[ -n $disk ]]; then
-        yes | vgremove $disk >> commands.log 2>> errors.log
-      fi
+      yes | vgremove $disk >> commands.log 2>> errors.log
 
       ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
       wipefs --all --force $drive >> commands.log 2>> errors.log
     done
   fi
+
 
   # In case there was LUKS before
   disk=$(lsblk | awk '$6 ~ "crypt" {print substr($1,3)}')
@@ -573,17 +570,6 @@ disk_root_drives() {
       read -p "Choose root drive: " user_choice
     done
 
-    # We want Y/N only
-    local answer=-1
-    while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
-      read -p "Use separate drive for /home? (Y/N): " answer
-    done
-    if [[ ${answer,,} =~ ^y(es)?$ ]]; then 
-      disk_separate_home=true 
-    else
-      disk_separate_home=false
-    fi
-
     disk_root="/dev/${drives[$user_choice]}"
     echo "$disk_root"   # return value
   fi
@@ -619,7 +605,7 @@ disk_home_drives() {
       read -p "Choose /home drive: " user_choice
     done
 
-    disk_home="/dev/${$1[$user_choice]}"
+    disk_home="/dev/${drives[$user_choice]}"
     echo "$disk_home"   # return value
   fi
 
@@ -737,22 +723,22 @@ disk_lvm_lv() {
 }
 
 disk_luks_part() {
-  echo $disk_luks_pass | cryptsetup -q luksFormat --type luks2 $1
+  echo $disk_luks_pass | cryptsetup -q luksFormat --type luks2 $1 >> commands.log 2>> errors.log
   
   if [[ $? -eq 0 ]]; then
-    cecho "Encrypted partition ($1) create: SUCCESS"
+    cecho "Encrypted partition ($1) create: SUCCESS" >&2
   else
-    cecho "Encrypted partition ($1) create: FAILED"
+    cecho "Encrypted partition ($1) create: FAILED" >&2
     exit 1
   fi
 
-  echo $disk_luks_pass | cryptsetup luksOpen $1 $disk_luks_root_name
+  echo $disk_luks_pass | cryptsetup luksOpen $1 $disk_luks_root_name >> commands.log 2>> errors.log
   root_part=/dev/mapper/$disk_luks_root_name
 
   if [[ $? -eq 0 ]]; then
-    cecho "Decrypt partition ($1) and ready it to mount: SUCCESS"
+    cecho "Decrypt partition ($1) and ready it to mount: SUCCESS" >&2
   else
-    cecho "Decrypt partition ($1) and ready it to mount: FAILED"
+    cecho "Decrypt partition ($1) and ready it to mount: FAILED" >&2
     exit 1
   fi
 
@@ -907,15 +893,25 @@ main() {
     local root_drives=$(disk_root_drives "${disk_drives[@]}")
     root_drives=($root_drives)
 
+
+    # We want Y/N only
+    answer=-1
+    while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+      read -p "Use separate drive for /home? (Y/N): " answer
+    done
+    if [[ ${answer,,} =~ ^y(es)?$ ]]; then disk_separate_home=true 
+    else disk_separate_home=false; fi
+
     if [[ $disk_separate_home = true || $disk_use_lvm = true ]]; then
       local home_drives=$(disk_home_drives "${disk_drives[@]}")
       home_drives=($home_drives)
     fi
 
+
     if [[ $disk_use_lvm = true ]]; then
       disk_root=${root_drives[0]}
-      disk_lvm_root=${root_drives[@]}
-      disk_lvm_home=${home_drives[@]}
+      disk_lvm_root=("${root_drives[@]}")
+      disk_lvm_home=("${home_drives[@]}")
     else
       disk_root=$root_drives
       disk_home=$home_drives
