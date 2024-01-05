@@ -341,26 +341,35 @@ disk_clean_drive() {
   # disk_lvm_home   -   config variable
 
   # Clean eventual leftovers
-  # In case there was LVM before
-  ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
-
   local disk=""
   if [[ $1 = "STANDARD" ]]; then
     disk=$(pvs | awk -v d="$disk_root" '$1 ~ d {print $2}')
-    yes | vgremove $disk >> commands.log 2>> errors.log
+    if [[ -n $disk ]]; then
+      yes | vgremove $disk 2>> errors.log
+    fi
+
     ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_root >> commands.log 2>> errors.log
 
+
     disk=$(pvs | awk -v d="$disk_home" '$1 ~ d {print $2}')
-    yes | vgremove $disk >> commands.log 2>> errors.log
+    if [[ -n $disk ]]; then
+      yes | vgremove $disk 2>> errors.log
+    fi
+
     ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_home >> commands.log 2>> errors.log
   fi
 
   if [[ $1 = "LVM" ]]; then
+    ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
+
     for drive in ${disk_lvm_root[@]} ${disk_lvm_home[@]}; do
-      disk=$(pvs | awk -v d="$drive" '$1 ~ d {print $2}')
-      yes | vgremove $disk >> commands.log 2>> errors.log
+      disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
+      if [[ -n $disk ]]; then
+        yes | vgremove $disk >> commands.log 2>> errors.log
+      fi
+
       ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
       wipefs --all --force $drive >> commands.log 2>> errors.log
     done
@@ -373,7 +382,7 @@ disk_clean_drive() {
   fi
 }
 
-disk_disk_create_partition() {
+disk_create_partition() {
   echo n      # Create new partition
   echo        # Partition number (accept default)
   echo        # First sector (accept deafult)
@@ -392,7 +401,7 @@ disk_format_drive() {
   # disk_lvm_home         -   config variable
 
   local free_space="100FREE"
-  # disk_clean_drive "$1"
+  disk_clean_drive "$1"
 
 
   local root_size=""
@@ -526,7 +535,7 @@ disk_list_drives() {
     cecho "[WARNING] Cannot get drive size!" >&2
   fi
   
-  local drives=($(lsblk -no NAME | awk '$1 !~ /[0-9]/ && $6 !~ "lvm|crypt" || ($1 ~ /nvme/ && $1 !~ /p/) {print $1}'))
+  local drives=($(lsblk | awk '$1 !~ "NAME|-" && $1 !~ /[0-9]/ && $6 !~ "lvm|crypt" || ($1 ~ /nvme/ && $1 !~ /p/) {print $1}'))
   if [[ $? -ne 0 || -z $drives ]]; then
     cecho "Get list of all drives: FAILED" >&2
     exit 1
@@ -555,10 +564,12 @@ disk_root_drives() {
   # -- disk_root            -   config variable
   # -- disk_separate_home   -   config variable
 
+  local drives=("$1")
+
   # We want to read numbers only
   local user_choice=-1
   if [[ $disk_use_lvm = false ]]; then
-    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#$1[@]} ]]; do
+    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; do
       read -p "Choose root drive: " user_choice
     done
 
@@ -582,7 +593,7 @@ disk_root_drives() {
       # Catch empty string and invalid input
       if [[ -z $user_choice && ${#disk_lvm_root[@]} -gt 0 ]]; then
         break
-      elif [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#$1[@]} ]]; then
+      elif [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; then
         continue
       else
         # Add drive to LVM group
@@ -598,10 +609,12 @@ disk_home_drives() {
   # -- disk_use_lvm   -   config variable
   # -- disk_home      -   config variable
 
+  local drives=("$1")
+
   if [[ $disk_use_lvm = false ]]; then
     # We want to read numbers only
     local user_choice=-1
-    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#$1[@]} ]]; do
+    while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; do
       read -p "Choose /home drive: " user_choice
     done
 
@@ -612,7 +625,7 @@ disk_home_drives() {
       # Catch empty string and invalid input
       if [[ -z $user_choice && ${#disk_lvm_home[@]} -gt 0 ]]; then
         break
-      elif [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#$1[@]} ]]; then
+      elif [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; then
         continue
       else
         # Add drive to LVM group
@@ -646,9 +659,9 @@ disk_part_mkfs() {
   wipefs --force --all $1 >> commands.log 2>> errors.log
   yes | mkfs.$2 $1 >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
-    cecho "$3 partition standard format ($2): SUCCESS"
+    cecho "$3 Partition format ($2): SUCCESS"
   else
-    cecho "$3 partition standard format ($2): FAILED"
+    cecho "$3 partition format ($2): FAILED"
     exit 1
   fi
 }
@@ -660,13 +673,13 @@ disk_lvm_pv() {
       # Partition on the drive with ESP
       if [[ $cnt -eq 0 ]]; then
         drives_root+=(${disk_lvm_root[$cnt]}2)
-        yes | pvcreate ${disk_lvm_root[$cnt]}2 >> commands.log 2>> errors.log
+        yes | pvcreate -ff ${disk_lvm_root[$cnt]}2 >> commands.log 2>> errors.log
       fi
 
       # Every next root partition
       if [[ $cnt -gt 0 && ${#disk_lvm_root[@]} -gt 1 ]]; then
         drives_root+=(${disk_lvm_root[$cnt]}1)
-        yes | pvcreate ${disk_lvm_root[$cnt]}1 >> commands.log 2>> errors.log
+        yes | pvcreate -ff ${disk_lvm_root[$cnt]}1 >> commands.log 2>> errors.log
       fi
 
       if [[ $? -eq 0 ]]; then
@@ -678,11 +691,13 @@ disk_lvm_pv() {
     done
 
     echo "${drives_root[@]}"    # return value
-  else
+  fi
+
+  if [[ $1 = "HOME" ]]
     local drives_home=()
     for cnt in ${!disk_lvm_home[@]}; do
       drives_home+=(${disk_lvm_home[$cnt]}1)
-      yes | pvcreate ${disk_lvm_home[$cnt]}1 >> commands.log 2>> errors.log
+      yes | pvcreate -ff ${disk_lvm_home[$cnt]}1 >> commands.log 2>> errors.log
 
       if [[ $? -eq 0 ]]; then
         cecho "LVM Physical Volume (${drives_home[$cnt]}) create: SUCCESS" >&2
@@ -697,7 +712,8 @@ disk_lvm_pv() {
 }
 
 disk_lvm_vg() {
-  yes | vgcreate $1 ${$2[@]} >> commands.log 2>> errors.log
+  local vgs=("$2")
+  yes | vgcreate $1 ${vgs[@]} >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     cecho "LVM Volume Group ($1) create: SUCCESS"
   else
@@ -735,6 +751,8 @@ disk_luks_part() {
     cecho "Decrypt partition ($1) and ready it to mount: FAILED"
     exit 1
   fi
+
+  echo "$root_part"   # return value
 }
 
 disk_part_mount() {
@@ -886,6 +904,7 @@ main() {
     fi
 
     if [[ $disk_use_lvm = true ]]; then
+      disk_root=${root_drives[0]}
       disk_lvm_root=${root_drives[@]}
       disk_lvm_home=${home_drives[@]}
     else
@@ -895,6 +914,8 @@ main() {
 
     disk_root_size=$(disk_part_size "root")
     disk_home_size=$(disk_part_size "home")
+  else
+    disk_root=${disk_lvm_root[0]}
   fi
 
 
@@ -904,20 +925,18 @@ main() {
 
   # It does only matter without LVM or LUKS
   if [[ ${disk_root} =~ /nvme/ ]]; then
+    esp_part=${disk_root}p1     # eg. /dev/nvme0n1p1
     if [[ $disk_separate_home = true ]]; then
-      esp_part=${disk_root}p1     # eg. /dev/nvme0n1p1
       root_part=${disk_root}p2    # eg. /dev/nvme0n1p2
     else
-      esp_part=${disk_root}p1     # eg. /dev/nvme0n1p1
       root_part=${disk_root}p2    # eg. /dev/nvme0n1p2
       home_part=${disk_root}p3    # eg. /dev/nvme0n1p3
     fi
   else
+    esp_part=${disk_root}1      # eg. /dev/sda1
     if [[ $disk_separate_home = true ]]; then
-      esp_part=${disk_root}1      # eg. /dev/sda1
       root_part=${disk_root}2     # eg. /dev/sda2
     else
-      esp_part=${disk_root}1      # eg. /dev/sda1
       root_part=${disk_root}2     # eg. /dev/sda2
       home_part=${disk_root}3     # eg. /dev/sda3
     fi
@@ -945,8 +964,6 @@ main() {
   # -- disk_luks_root_name    -   config variable
   # ---------------------------------------------------------------------------
 
-  disk_part_mkfs "$esp_part" "vfat" "ESP"
-
   if [[ $disk_use_lvm = true ]]; then
     root_drives=()
     home_drives=()
@@ -956,7 +973,6 @@ main() {
       read -p "Choose home group name (eg. home): " disk_lvm_home_group
     fi
 
-    disk_clean_drive "LVM"
     root_drives=$(disk_lvm_pv "ROOT")
     home_drives=$(disk_lvm_pv "HOME")
 
@@ -973,8 +989,6 @@ main() {
 
     root_part=/dev/$disk_lvm_root_group/$disk_lvm_root_volume
     home_part=/dev/$disk_lvm_home_group/$disk_lvm_home_volume
-  else
-    disk_clean_drive "STANDARD"
   fi
 
   
@@ -985,9 +999,11 @@ main() {
       read -p "Choose LUKS root partition name (eg. cryptroot): " disk_luks_root_name
     fi
 
-    disk_part_luks "$root_part"
+    root_part=$(disk_luks_part "$root_part")
   fi
 
+
+  disk_part_mkfs "$esp_part" "vfat" "ESP"
 
   if [[ $interactive_mode = true ]]; then
     read -p "Choose root filesystem (ext4, xfs, btrfs etc.): " disk_root_fs
