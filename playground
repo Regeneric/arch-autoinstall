@@ -343,30 +343,33 @@ disk_clean_drive() {
 
   # Clean eventual leftovers
   local disk=""
+  # ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
+  local drives=$(lsblk | awk '$1 !~ "NAME|-" && $1 ~ /[0-9]/ {print $1}' | tr -d '\├\─') 
+  umount "$drives"
+
+
   if [[ $1 = "STANDARD" ]]; then
-    disk=$(pvs | awk -v d="$disk_root" '$1 ~ d {print $2}')
+    disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
     yes | vgremove $disk >> commands.log 2>> errors.log
 
-    ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
+    # ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_root >> commands.log 2>> errors.log
 
 
-    disk=$(pvs | awk -v d="$disk_home" '$1 ~ d {print $2}')
+    disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
     yes | vgremove $disk >> commands.log 2>> errors.log
 
-    ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
+    # ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_home >> commands.log 2>> errors.log
   fi
 
 
   if [[ $1 = "LVM" ]]; then
-    ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
-
     for drive in ${disk_lvm_root[@]} ${disk_lvm_home[@]}; do
       disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
       yes | vgremove $disk >> commands.log 2>> errors.log
 
-      ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
+      # ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
       wipefs --all --force $drive >> commands.log 2>> errors.log
     done
   fi
@@ -645,8 +648,6 @@ disk_part_size() {
 }
 
 disk_part_mkfs() {
-  ls $1 | xargs -n1 umount -l >> commands.log 2>> errors.log
-  wipefs --force --all $1 >> commands.log 2>> errors.log
   yes | mkfs.$2 $1 >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     cecho "$3 Partition format ($2): SUCCESS"
@@ -929,6 +930,7 @@ main() {
   local home_part=""
 
   # It does only matter without LVM or LUKS
+  home_part=${disk_home}
   if [[ ${disk_root} =~ /nvme/ ]]; then
     esp_part=${disk_root}p1     # eg. /dev/nvme0n1p1
     if [[ $disk_separate_home = true ]]; then
