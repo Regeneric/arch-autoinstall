@@ -342,24 +342,24 @@ disk_clean_drive() {
   # disk_lvm_home   -   config variable
 
   # Clean eventual leftovers
-  local disk=""
-  # ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
-  local drives=$(lsblk | awk '$1 !~ "NAME|-" && $1 ~ /[0-9]/ {print $1}' | tr -d '\├\─') 
-  umount "$drives"
+  # local drives=$(lsblk | awk '{if ($1 !~ "NAME|loop|sr|-" && $1 ~ /[0-9]/){print $1}} if($6 ~ "lvm|crypt"){print $7}}' | tr -d '\├\─')
+  local drives=$(lsblk | awk '$1 !~ "NAME|-|loop|sr" && $1 ~ /[0-9]/ {print $1}' | tr -d '\├\─') 
+  local mounts=$(lsblk | awk '$1 !~ "NAME|loop|sr" && $6 ~ "lvm|crypt" {print $7}' | tr -d '\├\─')
+  local disk=$(printf "/dev/%s " $drives)
+
+  umount -l $mounts >> commands.log 2>> errors.log
+  umount -l $disk >> commands.log 2>> errors.log
+  wipefs --all --force $disk >> commands.log 2>> errors.log
 
 
   if [[ $1 = "STANDARD" ]]; then
-    disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
+    disk=$( { pvs | awk -v d="$disk_root" '$1 ~ d {print $2}' ; } 2>/dev/null )
     yes | vgremove $disk >> commands.log 2>> errors.log
 
-    # ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
+    disk=$( { pvs | awk -v d="$disk_home" '$1 ~ d {print $2}' ; } 2>/dev/null )
+    yes | vgremove $disk >> commands.log 2>> errors.log
+
     wipefs --all --force $disk_root >> commands.log 2>> errors.log
-
-
-    disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
-    yes | vgremove $disk >> commands.log 2>> errors.log
-
-    # ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
     wipefs --all --force $disk_home >> commands.log 2>> errors.log
   fi
 
@@ -369,7 +369,6 @@ disk_clean_drive() {
       disk=$( { pvs | awk -v d="$drive" '$1 ~ d {print $2}' ; } 2>/dev/null )
       yes | vgremove $disk >> commands.log 2>> errors.log
 
-      # ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
       wipefs --all --force $drive >> commands.log 2>> errors.log
     done
   fi
@@ -895,13 +894,15 @@ main() {
     root_drives=($root_drives)
 
 
-    # We want Y/N only
-    answer=-1
-    while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
-      read -p "Use separate drive for /home? (Y/N): " answer
-    done
-    if [[ ${answer,,} =~ ^y(es)?$ ]]; then disk_separate_home=true 
-    else disk_separate_home=false; fi
+    if [[ $disk_use_lvm = false ]]; then
+      # We want Y/N only
+      answer=-1
+      while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+        read -p "Use separate drive for /home? (Y/N): " answer
+      done
+      if [[ ${answer,,} =~ ^y(es)?$ ]]; then disk_separate_home=true 
+      else disk_separate_home=false; fi
+    fi
 
     if [[ $disk_separate_home = true || $disk_use_lvm = true ]]; then
       local home_drives=$(disk_home_drives "${disk_drives[@]}")
@@ -930,7 +931,7 @@ main() {
   local home_part=""
 
   # It does only matter without LVM or LUKS
-  home_part=${disk_home}
+  home_part=${disk_home}1
   if [[ ${disk_root} =~ /nvme/ ]]; then
     esp_part=${disk_root}p1     # eg. /dev/nvme0n1p1
     if [[ $disk_separate_home = true ]]; then
