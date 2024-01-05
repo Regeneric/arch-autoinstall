@@ -564,7 +564,7 @@ disk_root_drives() {
   # -- disk_root            -   config variable
   # -- disk_separate_home   -   config variable
 
-  local drives=("$1")
+  local drives=("$@")
 
   # We want to read numbers only
   local user_choice=-1
@@ -572,7 +572,6 @@ disk_root_drives() {
     while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; do
       read -p "Choose root drive: " user_choice
     done
-
 
     # We want Y/N only
     local answer=-1
@@ -585,10 +584,12 @@ disk_root_drives() {
       disk_separate_home=false
     fi
 
-
-    disk_root="/dev/${$1[$user_choice]}"
+    disk_root="/dev/${drives[$user_choice]}"
     echo "$disk_root"   # return value
-  else
+  fi
+
+
+  if [[ $disk_use_lvm = true ]]; then
     while read -p "Choose root drives (Enter to continue): " user_choice; do
       # Catch empty string and invalid input
       if [[ -z $user_choice && ${#disk_lvm_root[@]} -gt 0 ]]; then
@@ -597,7 +598,7 @@ disk_root_drives() {
         continue
       else
         # Add drive to LVM group
-        disk_lvm_root+=(/dev/${$1[$user_choice]})
+        disk_lvm_root+=(/dev/${drives[$user_choice]})
       fi
     done
 
@@ -609,18 +610,21 @@ disk_home_drives() {
   # -- disk_use_lvm   -   config variable
   # -- disk_home      -   config variable
 
-  local drives=("$1")
+  local drives=("$@")
 
+  local user_choice=-1
   if [[ $disk_use_lvm = false ]]; then
     # We want to read numbers only
-    local user_choice=-1
     while [[ -n ${user_choice//[0-9]/} || $user_choice -lt 0 || $user_choice -gt ${#drives[@]} ]]; do
       read -p "Choose /home drive: " user_choice
     done
 
     disk_home="/dev/${$1[$user_choice]}"
     echo "$disk_home"   # return value
-  else
+  fi
+
+
+  if [[ $disk_use_lvm = true ]]; then
     while read -p "Choose /home drives (Enter to continue): " user_choice; do
       # Catch empty string and invalid input
       if [[ -z $user_choice && ${#disk_lvm_home[@]} -gt 0 ]]; then
@@ -629,7 +633,7 @@ disk_home_drives() {
         continue
       else
         # Add drive to LVM group
-        disk_lvm_home+=(/dev/${$1[$user_choice]})
+        disk_lvm_home+=(/dev/${drives[$user_choice]})
       fi
     done
   
@@ -693,7 +697,7 @@ disk_lvm_pv() {
     echo "${drives_root[@]}"    # return value
   fi
 
-  if [[ $1 = "HOME" ]]
+  if [[ $1 = "HOME" ]]; then
     local drives_home=()
     for cnt in ${!disk_lvm_home[@]}; do
       drives_home+=(${disk_lvm_home[$cnt]}1)
@@ -898,9 +902,14 @@ main() {
 
 
     local disk_drives=$(disk_list_drives)
-    local root_drives=$(disk_root_drives "$disk_drives")
+    disk_drives=($disk_drives)
+
+    local root_drives=$(disk_root_drives "${disk_drives[@]}")
+    root_drives=($root_drives)
+
     if [[ $disk_separate_home = true || $disk_use_lvm = true ]]; then
-      local home_drives=$(disk_home_drives "$disk_drives")
+      local home_drives=$(disk_home_drives "${disk_drives[@]}")
+      home_drives=($home_drives)
     fi
 
     if [[ $disk_use_lvm = true ]]; then
@@ -941,7 +950,7 @@ main() {
       home_part=${disk_root}3     # eg. /dev/sda3
     fi
   fi
-  
+
   if [[ $disk_use_lvm = true ]]; then
     disk_format_drive "LVM"
   else
