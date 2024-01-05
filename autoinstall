@@ -67,7 +67,7 @@ fi
 
 
 # Check if we're in the UEFI mode
-ls /sys/firmware/efi/efivars >commands.log 2>errors.log
+ls /sys/firmware/efi/efivars > commands.log 2> errors.log
 if [[ $? -eq 0 ]]; then
   echo "$(idate) System in UEFI mode: SUCCESS" | tee -a install.log
 else
@@ -136,7 +136,7 @@ if [[ -z $active_int ]]; then
 
     # Try to connect to the wifi network
     if [[ $net_use_wireless = true && $net_allow_gsm = false ]]; then
-      echo -e "station $int connect ${net_wifi_ssid}\n${net_wifi_pass}" | iwctl >>commands.log 2>>error.log
+      echo -e "station $int connect ${net_wifi_ssid}\n${net_wifi_pass}" | iwctl >> commands.log 2>> errors.log
       if [[ $? -eq 0 ]]; then
         echo "$(idate) Connect to WiFi network $net_wifi_ssid using interface $int: SUCCESS" | tee -a install.log
         active_int=$int
@@ -237,7 +237,7 @@ if [[ $int_status = down ]]; then
 
 
   # Add IP address to the interface
-  ip address add $net_ip_address broadcast + dev ${active_int} >>commands.logs 2>>errors.log
+  ip address add $net_ip_address broadcast + dev ${active_int} >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) Add address $net_ip_address to interface ${active_int}: SUCCESS" | tee -a install.log
   else
@@ -246,7 +246,7 @@ if [[ $int_status = down ]]; then
   fi
 
   # Add default gateway
-  ip route add default via $net_gateway >>commands.logs 2>>errors.log
+  ip route add default via $net_gateway >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) Add default gateway $net_gateway via ${active_int}: SUCCESS" | tee -a install.log
   else
@@ -254,7 +254,7 @@ if [[ $int_status = down ]]; then
     echo "$(idate) [WARNING] Possibly no direct connection to the network" | tee -a install.log
   fi
 
-  ip link set ${active_int} up >>commands.logs 2>>errors.log
+  ip link set ${active_int} up >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) Bring link ${active_int} UP: SUCCESS" | tee -a install.log
   else
@@ -285,7 +285,7 @@ gateways=($gateway)
 if [[ ${#gateways[@]} -gt 1 ]]; then
   echo "$(idate) [WARNING] More than one gateway!" | tee -a install.log
   for gate in ${gateways[@]}; do
-    ping -c 4 $gate >>commands.logs 2>>errors.log
+    ping -c 4 $gate >> commands.log 2>> errors.log
     if [[ $? -eq 0 ]]; then 
       # To be changed: break loop on first successfull ping
       gateway=$gate
@@ -294,14 +294,14 @@ if [[ ${#gateways[@]} -gt 1 ]]; then
   done
 else
   if [[ -n $gateway ]]; then net_gateway=$gateway; fi
-  ping -c 4 $net_gateway >>commands.logs 2>>errors.log
+  ping -c 4 $net_gateway >> commands.log 2>> errors.log
 fi
 
 if [[ $? -eq 0 ]]; then
   echo "$(idate) Route to gateway $net_gateway: SUCCESS" | tee -a install.log
 
   # Check connection to the internet and DNS resolving
-  ping -c 4 google.com >>commands.logs 2>>errors.log
+  ping -c 4 google.com >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) Route to google.com: SUCCESS" | tee -a install.log
   else
@@ -339,33 +339,33 @@ format_drive() {
 
   # Clean eventual leftovers
   # In case there was LVM before
-  ls /dev/mapper/* | xargs -n1 umount -l >>commands.logs 2>>errors.log
+  ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
 
   if [[ $1 = STANDARD ]]; then
     disk=$(pvs | awk -v d="$disk_root" '$1 ~ d {print $2}')
-    yes | vgremove $disk >>commands.logs 2>>errors.log
-    ls $disk_root* | xargs -n1 umount -l >>commands.logs 2>>errors.log
-    wipefs --all --force $disk_root >>commands.logs 2>>errors.log
+    yes | vgremove $disk >> commands.log 2>> errors.log
+    ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
+    wipefs --all --force $disk_root >> commands.log 2>> errors.log
 
     disk=$(pvs | awk -v d="$disk_home" '$1 ~ d {print $2}')
-    yes | vgremove $disk >>commands.logs 2>>errors.log
-    ls $disk_home* | xargs -n1 umount -l >>commands.logs 2>>errors.log
-    wipefs --all --force $disk_home >>commands.logs 2>>errors.log
+    yes | vgremove $disk >> commands.log 2>> errors.log
+    ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
+    wipefs --all --force $disk_home >> commands.log 2>> errors.log
   fi
 
   if [[ $1 = LVM ]]; then
     for drive in ${disk_lvm_root[@]} ${disk_lvm_home[@]}; do
       disk=$(pvs | awk -v d="$drive" '$1 ~ d {print $2}')
-      yes | vgremove $disk >>commands.logs 2>>errors.log
-      ls $drive* | xargs -n1 umount -l >>commands.logs 2>>errors.log
-      wipefs --all --force $drive >>commands.logs 2>>errors.log
+      yes | vgremove $disk >> commands.log 2>> errors.log
+      ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
+      wipefs --all --force $drive >> commands.log 2>> errors.log
     done
   fi
 
   # In case there was LUKS before
   disk=$(lsblk | awk '$6 ~ "crypt" {print substr($1,3)}')
   if [[ -n $disk ]]; then
-    cryptsetup luksClose $disk >>commands.logs 2>>errors.log
+    cryptsetup luksClose $disk >> commands.log 2>> errors.log
   fi
 
 
@@ -398,7 +398,7 @@ format_drive() {
 
       echo w    # Save changes to disk
       echo Y    # Confirm changes
-    ) | gdisk $disk_root >>commands.logs 2>>errors.log
+    ) | gdisk $disk_root >> commands.log 2>> errors.log
 
     if [[ $? -eq 0 ]]; then
       echo "$(idate) Standard disk partitioning | $disk_root: SUCCESS" | tee -a install.log
@@ -422,7 +422,7 @@ format_drive() {
 
         echo w
         echo Y
-      ) | gdisk $disk_home >>commands.logs 2>>errors.log
+      ) | gdisk $disk_home >> commands.log 2>> errors.log
 
       if [[ $? -eq 0 ]]; then
         echo "$(idate) Standard disk partitioning | $disk_home: SUCCESS" | tee -a install.log
@@ -447,7 +447,7 @@ format_drive() {
           create_partition "$free" 8E00
           echo w
           echo Y
-        ) | gdisk ${disk_lvm_root[0]} >>commands.logs 2>>errors.log
+        ) | gdisk ${disk_lvm_root[0]} >> commands.log 2>> errors.log
       else
         (
           echo o
@@ -455,7 +455,7 @@ format_drive() {
           create_partition "$free" 8E00
           echo w
           echo Y
-        ) | gdisk ${disk_lvm_root[$cnt]} >>commands.logs 2>>errors.log
+        ) | gdisk ${disk_lvm_root[$cnt]} >> commands.log 2>> errors.log
       fi
 
       if [[ $? -eq 0 ]]; then
@@ -473,7 +473,7 @@ format_drive() {
         create_partition "$free" 8E00
         echo w
         echo Y
-      ) | gdisk ${disk_lvm_home[$cnt]} >>commands.logs 2>>errors.log
+      ) | gdisk ${disk_lvm_home[$cnt]} >> commands.log 2>> errors.log
 
       if [[ $? -eq 0 ]]; then
         echo "$(idate) LVM disk partitioning | ${disk_lvm_home[$cnt]}: SUCCESS" | tee -a install.log
@@ -672,9 +672,9 @@ fi
 esp_part=${disk_root}1
 
 # ESP partition
-ls $esp_part | xargs -n1 umount -l >>commands.logs 2>>errors.log
-wipefs --force --all $esp_part >>commands.log 2>>error.log
-yes | mkfs.vfat $esp_part >>commands.logs 2>>errors.log
+ls $esp_part | xargs -n1 umount -l >> commands.log 2>> errors.log
+wipefs --force --all $esp_part >> commands.log 2>> errors.log
+yes | mkfs.vfat $esp_part >> commands.log 2>> errors.log
 if [[ $? -eq 0 ]]; then
   echo "$(idate) ESP partition standard format (vfat): SUCCESS" | tee -a install.log
 else
@@ -687,7 +687,7 @@ fi
 if [[ $disk_use_lvm = true ]]; then
   drives_root=()
   drives_home=()
-  ls /dev/mapper/* | xargs -n1 umount -l >>commands.logs 2>>errors.log 
+  ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log 
 
   if [[ $interactive_mode = true ]]; then
     read -p "Choose root group name (eg. root): " disk_lvm_root_group
@@ -707,25 +707,25 @@ if [[ $disk_use_lvm = true ]]; then
   done
 
   for vg in ${lvm_vg[@]}; do
-    yes | vgremove $vg >>commands.logs 2>>errors.log
+    yes | vgremove $vg >> commands.log 2>> errors.log
   done
 
   # In case there was LUKS before
   disk=$(lsblk | awk '$6 ~ "crypt" {print substr($1,3)}')
-  cryptsetup luksClose $disk >>commands.logs 2>>errors.log
+  cryptsetup luksClose $disk >> commands.log 2>> errors.log
 
 
   for cnt in ${!disk_lvm_root[@]}; do
     # Partition on the drive with ESP
     if [[ $cnt -eq 0 ]]; then
       drives_root+=(${disk_lvm_root[$cnt]}2)
-      yes | pvcreate ${disk_lvm_root[$cnt]}2 >>commands.logs 2>>errors.log
+      yes | pvcreate ${disk_lvm_root[$cnt]}2 >> commands.log 2>> errors.log
     fi
 
     # Every next root partition
     if [[ $cnt -gt 0 && ${#disk_lvm_root[@]} -gt 1 ]]; then
       drives_root+=(${disk_lvm_root[$cnt]}1)
-      yes | pvcreate ${disk_lvm_root[$cnt]}1 >>commands.logs 2>>errors.log
+      yes | pvcreate ${disk_lvm_root[$cnt]}1 >> commands.log 2>> errors.log
     fi
 
     if [[ $? -eq 0 ]]; then
@@ -738,7 +738,7 @@ if [[ $disk_use_lvm = true ]]; then
 
   for cnt in ${!disk_lvm_home[@]}; do
     drives_home+=(${disk_lvm_home[$cnt]}1)
-    yes | pvcreate ${disk_lvm_home[$cnt]}1 >>commands.logs 2>>errors.log
+    yes | pvcreate ${disk_lvm_home[$cnt]}1 >> commands.log 2>> errors.log
     if [[ $? -eq 0 ]]; then
       echo "$(idate) LVM Physical Volume (${drives_home[$cnt]}) create: SUCCESS" | tee -a install.log
     else
@@ -748,7 +748,7 @@ if [[ $disk_use_lvm = true ]]; then
   done
 
   # Root LVM group
-  yes | vgcreate $disk_lvm_root_group ${drives_root[@]} >>commands.logs 2>>errors.log
+  yes | vgcreate $disk_lvm_root_group ${drives_root[@]} >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) LVM Volume Group ($disk_lvm_root_group) create: SUCCESS" | tee -a install.log
   else
@@ -757,7 +757,7 @@ if [[ $disk_use_lvm = true ]]; then
   fi
 
   # Home LVM group
-  yes | vgcreate $disk_lvm_home_group ${drives_home[@]} >>commands.logs 2>>errors.log
+  yes | vgcreate $disk_lvm_home_group ${drives_home[@]} >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) LVM Volume Group ($disk_lvm_home_group) create: SUCCESS" | tee -a install.log
   else
@@ -771,7 +771,7 @@ if [[ $disk_use_lvm = true ]]; then
   fi
 
   # Root logical volume
-  yes | lvcreate -l 100%FREE -n $disk_lvm_root_volume $disk_lvm_root_group >>commands.logs 2>>errors.log
+  yes | lvcreate -l 100%FREE -n $disk_lvm_root_volume $disk_lvm_root_group >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) LVM Logical Volume ($disk_lvm_root_volume) create: SUCCESS" | tee -a install.log
   else
@@ -780,7 +780,7 @@ if [[ $disk_use_lvm = true ]]; then
   fi
 
   # Home logical volume
-  yes | lvcreate -l 100%FREE -n $disk_lvm_home_volume $disk_lvm_home_group >>commands.logs 2>>errors.log
+  yes | lvcreate -l 100%FREE -n $disk_lvm_home_volume $disk_lvm_home_group >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) LVM Logical Volume ($disk_lvm_home_volume) create: SUCCESS" | tee -a install.log
   else
@@ -847,8 +847,8 @@ if [[ $interactive_mode = true ]]; then
 fi
 
 # Root partition
-ls $root_part | xargs -n1 umount -l >>commands.logs 2>>errors.log
-yes | mkfs.$disk_root_fs $root_part >>commands.logs 2>>errors.log
+ls $root_part | xargs -n1 umount -l >> commands.log 2>> errors.log
+yes | mkfs.$disk_root_fs $root_part >> commands.log 2>> errors.log
 if [[ $? -eq 0 ]]; then
   echo "$(idate) Root partition ($root_part) $type format ($disk_root_fs): SUCCESS" | tee -a install.log
 else
@@ -857,8 +857,8 @@ else
 fi
 
 # /home partition
-ls $home_part | xargs -n1 umount -l >>commands.logs 2>>errors.log
-yes | mkfs.$disk_home_fs $home_part >>commands.logs 2>>errors.log
+ls $home_part | xargs -n1 umount -l >> commands.log 2>> errors.log
+yes | mkfs.$disk_home_fs $home_part >> commands.log 2>> errors.log
 if [[ $? -eq 0 ]]; then
   echo "$(idate) Home partition ($home_part) $type format ($disk_home_fs): SUCCESS" | tee -a install.log
 else
@@ -1049,11 +1049,11 @@ if [[ -n $os_user_name ]]; then
   if [[ -z $os_user_groups ]]; then os_user_groups=users; fi
 
   if [[ $os_user_groups == *sudo* ]]; then
-    arch-chroot /mnt /bin/bash -c "groupadd sudo" >>commands.logs 2>>errors.log
-    arch-chroot /mnt /bin/bash -c "sed -i '/^# %sudo/s/^# //' /etc/sudoers" >>commands.log 2>>errors.log
+    arch-chroot /mnt /bin/bash -c "groupadd sudo" >> commands.log 2>> errors.log
+    arch-chroot /mnt /bin/bash -c "sed -i '/^# %sudo/s/^# //' /etc/sudoers" >> commands.log 2>> errors.log
   fi
 
-  arch-chroot /mnt /bin/bash -c "useradd -mG $os_user_groups -s /bin/bash $os_user_name" >>commands.log 2>>errors.log
+  arch-chroot /mnt /bin/bash -c "useradd -mG $os_user_groups -s /bin/bash $os_user_name" >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     echo "$(idate) [CHROOT] User ($os_user_name) acount create: SUCCESS" | tee -a install.log
   else
@@ -1231,11 +1231,11 @@ while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
 done
 
 if [[ ${answer,,} =~ ^y(es)?$ ]]; then 
-  sync >>commands.logs 2>>errors.log
+  sync >> commands.log 2>> errors.log
 
-  umount /mnt/boot >>commands.logs 2>>errors.log
-  umount /mnt/home >>commands.logs 2>>errors.log
-  umount /mnt >>commands.logs 2>>errors.log
+  umount /mnt/boot >> commands.log 2>> errors.log
+  umount /mnt/home >> commands.log 2>> errors.log
+  umount /mnt >> commands.log 2>> errors.log
 
-  reboot >>commands.logs 2>>errors.log
-else sync >>commands.logs 2>>errors.log; fi
+  reboot >> commands.log 2>> errors.log
+else sync >> commands.log 2>> errors.log; fi
