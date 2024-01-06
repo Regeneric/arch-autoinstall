@@ -718,7 +718,7 @@ disk_lvm_vg() {
 
 disk_lvm_lv() {
   local disk_space="100%FREE"
-  if [[ ! $3 = "100FREE"]]; then disk_space=$3; fi
+  if [[ ! $3 = "100FREE" ]]; then disk_space=$3; fi
 
   yes | lvcreate -l $disk_space -n $1 $2 >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
@@ -759,6 +759,272 @@ disk_part_mount() {
   else
     cecho "$3 partition ($1) mount: FAILED"
     exit 1
+  fi
+}
+
+disk_post_install_sync() {
+  sync >> commands.log 2>> errors.log
+
+  local mounts=$(lsblk | awk '$1 !~ "NAME|loop|sr" && $6 ~ "lvm|crypt|part" {print $7}' | tr -d '\├\─')
+  if [[ -n $mounts ]]; then umount -l $mounts >> commands.log 2>> errors.log; fi
+}
+
+
+# -----------------------------------------------------------------------------
+# -- BASE SYSTEM
+# -----------------------------------------------------------------------------
+
+os_cpu_microcode() {  
+  if [[ $1 = "amd" ]]; then
+    pacstrap /mnt amd-ucode 2>> errors.log
+  fi
+
+  if [[ $1 = "intel" ]]; then
+    pacstrap /mnt intel-ucode 2>> errors.log
+  fi
+}
+
+os_kernel_type() {
+  if [[ $1 = "default" ]]; then
+    pacstrap /mnt base base-devel linux linux-firmware linux-headers dhcpcd vim git 2>> errors.log
+  else
+    pacstrap /mnt base base-devel linux-${1} linux-firmware linux-${1}-headers dhcpcd vim git 2>> errors.log
+  fi
+
+  if [[ $? -eq 0 ]]; then
+    cecho "Download base packages: SUCCESS"
+  else
+    cecho "Download base packages: FAILED"
+    exit 1
+  fi
+
+  os_cpu_microcode "$2"
+}
+
+os_initramfs() {
+  if [[ $disk_use_lvm = true ]]; then
+    if [[ $disk_use_luks = true ]]; then hooks="lvm2 encrypt"
+    else hooks="lvm2"; fi
+
+    pacstrap /mnt lvm2 2>> errors.log
+    arch-chroot /mnt /bin/bash -c "sed -i 's/\(HOOKS=(.*\)block\(.*\))/\1block ${hooks}\2)/' /etc/mkinitcpio.conf" 2>> errors.log
+    if [[ $? -eq 0 ]]; then
+      cecho "[CHROOT] Add hooks (${hooks[@]}) to mkinitcpio.conf: SUCCESS"
+    else
+      cecho "[CHROOT] Add hooks (${hooks[@]}) to mkinitcpio.conf]: FAILED"
+      exit 1
+    fi
+
+    if [[ $1 = "default" ]]; then
+      arch-chroot /mnt /bin/bash -c "mkinitcpio -p linux" 2>> errors.log
+    else
+      arch-chroot /mnt /bin/bash -c "mkinitcpio -p linux-${1}" 2>> errors.log
+    fi
+
+    if [[ $? -eq 0 ]]; then
+      cecho "[CHROOT] Create initial ramdisk: SUCCESS"
+    else
+      cecho "[CHROOT] Create initial ramdisk: FAILED"
+      exit 1
+    fi
+  fi
+}
+
+os_enable_dhcp() {
+  arch-chroot /mnt /bin/bash -c "systemctl enable dhcpcd" 2>> errors.log
+  if [[ $? -eq 0 ]]; then
+    cecho "[CHROOT] Enable DHCP daemon (dhcpcd): SUCCESS"
+  else
+    cecho "[CHROOT] Enable DHCP daemon (dhcpcd): FAILED"
+  fi
+}
+
+os_set_timezone() {
+  arch-chroot /mnt /bin/bash -c "ln -sf /usr/share/zoneinfo/${1} /etc/localtime" 2>> errors.log
+  arch-chroot /mnt /bin/bash -c "hwclock --systohc" 2>> errors.log
+  if [[ $? -eq 0 ]]; then
+    cecho "[CHROOT] Timezone (${1}) set: SUCCESS"
+  else
+    cecho "[CHROOT] Timezone (${1}) set: FAILED"
+  fi
+}
+
+os_set_locale() {
+  arch-chroot /mnt /bin/bash -c "sed -i 's/^#${1}\(.*\)$/${1}\1/' /etc/locale.gen" 2>> errors.log
+  arch-chroot /mnt /bin/bash -c "locale-gen" 2>> errors.log
+  if [[ $? -eq 0 ]]; then
+    cecho "[CHROOT] Locale ($1) generation: SUCCESS"
+  else
+    cecho "[CHROOT] Locale ($1) generation: FAILED"
+  fi
+}
+
+os_set_hostname() {
+  arch-chroot /mnt /bin/bash -c "echo '${1}' > /etc/hostname" 2>> errors.log
+  arch-chroot /mnt /bin/bash -c "echo '127.0.0.1 ${1}.localdomain ${1}' >> /etc/hosts" 2>> errors.log
+
+  cecho "[CHROOT] Hostname ${1} assigned to this machine"
+}
+
+os_create_account() {
+  if [[ -n $1 && ! $1 = "root" ]]; then
+    # Default user groups
+    if [[ -z $3 ]]; then 3="users"; fi
+
+    if [[ $3 == *sudo* ]]; then
+      arch-chroot /mnt /bin/bash -c "groupadd sudo" >> commands.log 2>> errors.log
+      arch-chroot /mnt /bin/bash -c "sed -i '/^# %sudo/s/^# //' /etc/sudoers" >> commands.log 2>> errors.log
+    fi
+
+    arch-chroot /mnt /bin/bash -c "useradd -mG $3 -s /bin/bash $1" >> commands.log 2>> errors.log
+    if [[ $? -eq 0 ]]; then
+      cecho "[CHROOT] User ($1) acount create: SUCCESS"
+    else
+      cecho "[CHROOT] User ($1) acount create: FAILED"
+    fi
+  else
+    cecho "[WARNING] User account has not been created"
+  fi
+
+
+  if [[ $? -eq 0 || $1 = "root" ]]; then
+    # Set user's password only if account was created successfully
+    arch-chroot /mnt /bin/bash -c "echo '${1}:${2}' | chpasswd" 2>> errors.log
+
+    if [[ $? -eq 0 ]]; then
+      cecho "[CHROOT] ${1} password set: SUCCESS"
+    else
+      cecho "[CHROOT] ${1} password set: FAILED"
+    fi
+  fi
+}
+
+os_bootloader() {
+  # Bootloader
+  arch-chroot /mnt /bin/bash -c "bootctl install" 2>> errors.log
+  if [[ $? -eq 0 ]]; then
+    cecho "[CHROOT] Bootloader install: SUCCESS"
+  else
+    cecho "[CHROOT] Bootloader install: FAILED"
+    exit 1
+  fi
+
+  arch-chroot /mnt /bin/bash -c "echo 'default arch' > /boot/loader/loader.conf" 2>> errors.log
+  arch-chroot /mnt /bin/bash -c "echo 'title Arch Linux' > /boot/loader/entries/arch.conf" 2>> errors.log
+  if [[ $1 = "default" ]]; then
+    arch-chroot /mnt /bin/bash -c "echo 'linux /vmlinuz-linux' >> /boot/loader/entries/arch.conf" 2>> errors.log
+    arch-chroot /mnt /bin/bash -c "echo 'initrd /initramfs-linux.img' >> /boot/loader/entries/arch.conf" 2>> errors.log
+  else
+    arch-chroot /mnt /bin/bash -c "echo 'linux /vmlinuz-linux-${1}' >> /boot/loader/entries/arch.conf" 2>> errors.log
+    arch-chroot /mnt /bin/bash -c "echo 'initrd /initramfs-linux-${1}.img' >> /boot/loader/entries/arch.conf" 2>> errors.log
+  fi
+
+  # amd-ucode
+  if [[ $2 = "amd" ]]; then
+    arch-chroot /mnt /bin/bash -c "echo 'initrd /amd-ucode.img' >> /boot/loader/entries/arch.conf" 2>> errors.log
+  fi
+
+  # intel-ucode
+  if [[ $2 = "intel" ]]; then
+    arch-chroot /mnt /bin/bash -c "echo 'initrd /intel-ucode.img' >> /boot/loader/entries/arch.conf" 2>> errors.log
+  fi
+
+  if [[ $disk_use_lvm = true ]]; then
+    if [[ $disk_use_luks = true ]]; then
+      luks_drive_uuid=$(arch-chroot )
+      arch-chroot /mnt /bin/bash -c "echo 'options cryptdevice=UUID=$(blkid /dev/${disk_lvm_root_group}/${disk_lvm_root_volume} | awk -F '["]' '{print $2}'):${disk_luks_root_name} root=/dev/mapper/${disk_luks_root_name} rw' >> /boot/loader/entries/arch.conf" 2>> errors.log
+    else
+      arch-chroot /mnt /bin/bash -c "echo 'options root=/dev/mapper/${disk_lvm_root_group}-${disk_lvm_root_volume} rw' >> /boot/loader/entries/arch.conf" 2>> errors.log
+    fi
+  else 
+    # Standard partition schema bootloader config
+    arch-chroot /mnt /bin/bash -c "echo 'options root=UUID=$(blkid $root_part | awk -F '["]' '{print $2}') rw' >> /boot/loader/entries/arch.conf" 2>> errors.log
+  fi
+
+
+  cecho "[CHROOT] Bootloader config done."
+}
+
+os_change_shell() {
+  if [[ -n $2 ]]; then
+    local shell_flag=false
+    case $2 in
+      "bash")
+        cecho "${2} already installed"
+        shell_flag=false
+        ;;
+      "zsh")
+        pacstrap /mnt $2 2>> errors.log
+        shell_flag=true
+        ;;
+      "fish")
+        pacstrap /mnt $2 lynx 2>> errors.log
+        shell_flag=true
+        ;;
+      *)
+        cecho "${2} install: FAILED"
+        shell_flag=false
+        ;;
+    esac
+
+
+    if [[ $shell_flag = true ]]; then
+      arch-chroot /mnt /bin/bash -c "usermod --shell /bin/${2} ${1}" 2>> errors.log
+    fi 
+
+    if [[ $? -eq 0 ]]; then
+      cecho "${2} install: SUCCESS"
+    else
+      cecho "${2} install: FAILED"
+    fi
+    
+    cecho "ADDITIONAL SHELL CONFIGURATION MAY BE NEEDED"
+  fi
+}
+
+os_install_de() {
+  # -- DESKTOP ENV -- #
+  if [[ $1 = true || -n $2 ]]; then
+    pacstrap /mnt xorg xorg-xinit xterm 2>> errors.log
+    if [[ $? -eq 0 ]]; then
+      cecho "Xorg install: SUCCESS"
+    else
+      cecho "Xorg install: FAILED"
+      exit 1
+    fi
+
+    local de=""
+    local dm=""
+    case $2 in
+      "plasma")
+        pacstrap /mnt plasma plasma-wayland-session kde-applications 2>> errors.log
+        de=Plasma
+        dm=SDDM 
+        ;;
+      "gnome") 
+        pacstrap /mnt gnome gnome-shell-extensions 2>> errors.log
+        de=GNOME
+        dm=GDM
+        ;;
+      "xfce") 
+        pacstrap /mnt xfce4 xfce4-goodies sddm 2>> errors.log
+        de=XFCE
+        dm=SDDM
+        ;;
+      *) 
+        cecho "Desktop Environment install: FAILED"
+        return -1
+        ;;
+    esac
+
+    if [[ $? -eq 0 ]]; then
+      cecho "$de install: SUCCESS"
+      cecho "REMEMBER TO ENABLE $dm AFTER REBOOT (systemctl enable --now ${dm,,})"
+    else
+      cecho "$de install: FAILED"
+      exit 1
+    fi
+    cecho "INSTALLING ADDITIONAL VIDEO DRIVERS MAY BE NEEDED"
   fi
 }
 
@@ -854,7 +1120,6 @@ main() {
   # ---------------------------------------------------------------------------
   # -- PARTITIONING
   # ---------------------------------------------------------------------------
-
 
   if [[ $interactive_mode = true ]]; then
     # Ugly workaround, to be changed
@@ -1037,6 +1302,126 @@ main() {
 
   mkdir /mnt/home
   disk_part_mount "$home_part" "/mnt/home" "Home"
+
+
+  #############################################################################
+  # -- BASE SYSTEM
+  # ---------------------------------------------------------------------------
+
+  echo
+  cecho "Checking for packages..."
+
+  # Download base of the system
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose kernel (eg. default | zen, vfio, lts etc.): " os_kernel 
+    if [[ -z $os_kernel ]]; then os_kernel="default"; fi
+  fi
+
+  os_kernel_type "$os_kernel" "$os_cpu"
+
+  # Generate fstab using UUID
+  genfstab -U /mnt > /mnt/etc/fstab
+  if [[ $? -eq 0 ]]; then
+    cecho "UUID fstab generation: SUCCESS"
+  else
+    cecho "UUID fstab generation: FAILED"
+    exit 1
+  fi
+
+
+  # ---------------------------------------------------------------------------
+  # -- INSIDE THE OS
+  # ---------------------------------------------------------------------------
+
+  os_initramfs "$os_kernel"
+  os_enable_dhcp
+
+  # Timezone settings
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose timezone (eg. Europe/Warsaw): " os_timezone
+  fi
+  os_set_timezone "$os_timezone"
+
+  # Locale settings
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose system locale (eg. en_US.UTF-8): " os_locale
+  fi
+  os_set_locale "$os_locale"
+
+  # Hostname
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose hostname: " os_hostname
+  fi
+  os_set_hostname "$os_hostname"
+
+
+  if [[ $interactive_mode = true ]]; then
+    read -s -p "Choose root password: " os_root_pass
+    echo
+  fi
+  os_create_account "root" "$os_root_pass"
+
+  # User account
+  if [[ $interactive_mode = true ]]; then
+    read -p "Choose user name: " os_user_name
+    read -s -p "Choose user password: " os_user_pass
+    echo
+    read -p "Choose user groups (default: users): " os_user_groups
+  fi
+  os_create_account "$os_user_name" "$os_user_pass" "$os_user_groups"
+
+  os_bootloader "$os_kernel"
+
+  if [[ $interactive_mode = true ]]; then
+    read -s -p "Choose shell to install: " os_shell
+    echo
+  fi
+  os_change_shell "root" "$os_shell"
+  os_change_shell "$os_user_name" "$os_shell"
+
+
+  if [[ $interactive_mode = true ]]; then
+    answer=-1
+    while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+      read -p "Do you want to install Xorg? (Y/N): " answer
+    done
+    if [[ ${answer,,} =~ ^y(es)?$ ]]; then os_install_xorg=true; fi
+
+    if [[ $os_install_xorg = true ]]; then
+      answer=-1
+      while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+        read -p "Do you want to install Desktop Environment? (Y/N): " answer
+      done
+      if [[ ${answer,,} =~ ^y(es)?$ ]]; then
+        read -p "Choose DE to install (eg. plasma, gnome, xfce): " os_desktop
+      fi
+    fi
+  fi
+
+  if [[ -n $os_install_xorg ]]; then 
+    os_install_de "$os_install_xorg" 
+  fi
+
+  if [[ -n $os_desktop ]]
+    os_install_de "$os_install_xorg" "$os_desktop"
+  fi
+
+
+  logs_dir="arch-install-logs"
+  mkdir /mnt/root/"$logs_dir"
+  cp *.log /mnt/root/"$logs_dir"/
+
+  answer=-1
+  while [[ ! ${answer,,} =~ ^y(es)?$ && ! ${answer,,} =~ ^n(o)?$ ]]; do
+    echo "Install logs are located in /root/$logs_dir/"
+    read -p "Do you want to reboot now? (Y/N): " answer
+  done
+  if [[ ${answer,,} =~ ^y(es)?$ ]]; then
+    disk_post_install_sync
+    reboot >> commands.log 2>> errors.log
+  else
+    sync >> commands.log 2>> errors.log
+  fi
 }
 
 handle_flags "$@"
