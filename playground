@@ -230,6 +230,8 @@ net_check_interfaces() {
   else 
     # If there is only one interface, we just check if it's up
     int_status=$(net_interface_status "$1")
+    echo "0) $1: $int_status" >&2
+
     if [[ $? -ne 0 ]]; then return -1; fi             # Cannot get int status
     if [[ $int_status = "up" ]]; then echo "$1"; fi   # Return running interface
   fi
@@ -342,14 +344,14 @@ disk_clean_drive() {
   # disk_lvm_home   -   config variable
 
   # Clean eventual leftovers
-  # local drives=$(lsblk | awk '{if ($1 !~ "NAME|loop|sr|-" && $1 ~ /[0-9]/){print $1}} if($6 ~ "lvm|crypt"){print $7}}' | tr -d '\├\─')
+  local drives=$(lsblk | awk '{if ($1 !~ "NAME|loop|sr|-" && $1 ~ /[0-9]/){print $1}} if($6 ~ "lvm|crypt"){print $7}}' | tr -d '\├\─')
   local drives=$(lsblk | awk '$1 !~ "NAME|-|loop|sr" && $1 ~ /[0-9]/ {print $1}' | tr -d '\├\─') 
   local mounts=$(lsblk | awk '$1 !~ "NAME|loop|sr" && $6 ~ "lvm|crypt" {print $7}' | tr -d '\├\─')
   local disk=$(printf "/dev/%s " $drives)
 
-  umount -l $mounts >> commands.log 2>> errors.log
+  if [[ -n $mounts ]]; then umount -l $mounts >> commands.log 2>> errors.log; fi
   umount -l $disk >> commands.log 2>> errors.log
-  wipefs --all --force $disk >> commands.log 2>> errors.log
+  # wipefs --all --force $disk >> commands.log 2>> errors.log
 
 
   if [[ $1 = "STANDARD" ]]; then
@@ -373,6 +375,29 @@ disk_clean_drive() {
     done
   fi
 
+
+  # ls /dev/mapper/* | xargs -n1 umount -l >> commands.log 2>> errors.log
+
+  # if [[ $1 = STANDARD ]]; then
+  #   disk=$(pvs | awk -v d="$disk_root" '$1 ~ d {print $2}')
+  #   yes | vgremove $disk >> commands.log 2>> errors.log
+  #   ls $disk_root* | xargs -n1 umount -l >> commands.log 2>> errors.log
+  #   wipefs --all --force $disk_root >> commands.log 2>> errors.log
+
+  #   disk=$(pvs | awk -v d="$disk_home" '$1 ~ d {print $2}')
+  #   yes | vgremove $disk >> commands.log 2>> errors.log
+  #   ls $disk_home* | xargs -n1 umount -l >> commands.log 2>> errors.log
+  #   wipefs --all --force $disk_home >> commands.log 2>> errors.log
+  # fi
+
+  # if [[ $1 = LVM ]]; then
+  #   for drive in ${disk_lvm_root[@]} ${disk_lvm_home[@]}; do
+  #     disk=$(pvs | awk -v d="$drive" '$1 ~ d {print $2}')
+  #     yes | vgremove $disk >> commands.log 2>> errors.log
+  #     ls $drive* | xargs -n1 umount -l >> commands.log 2>> errors.log
+  #     wipefs --all --force $drive >> commands.log 2>> errors.log
+  #   done
+  # fi
 
   # In case there was LUKS before
   disk=$(lsblk | awk '$6 ~ "crypt" {print substr($1,3)}')
@@ -702,8 +727,7 @@ disk_lvm_pv() {
 }
 
 disk_lvm_vg() {
-  local vgs=("$2")
-  yes | vgcreate $1 ${vgs[@]} >> commands.log 2>> errors.log
+  yes | vgcreate $1 $2 >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     cecho "LVM Volume Group ($1) create: SUCCESS"
   else
@@ -713,7 +737,7 @@ disk_lvm_vg() {
 }
 
 disk_lvm_lv() {
-  yes | lvcreate -l 100%FREE -n $1 $2 >> commands.log 2>> errors.log
+  yes | lvcreate -l $3 -n $1 $2 >> commands.log 2>> errors.log
   if [[ $? -eq 0 ]]; then
     cecho "LVM Logical Volume ($1) create: SUCCESS"
   else
@@ -952,8 +976,10 @@ main() {
 
   if [[ $disk_use_lvm = true ]]; then
     disk_format_drive "LVM"
+    partprobe >> commands.log 2>> errors.log
   else
     disk_format_drive "STANDARD"
+    partprobe >> commands.log 2>> errors.log
   fi
 
 
@@ -984,16 +1010,16 @@ main() {
     root_drives=$(disk_lvm_pv "ROOT")
     home_drives=$(disk_lvm_pv "HOME")
 
-    disk_lvm_vg "$disk_lvm_root_group" "${root_drives[@]}"
-    disk_lvm_vg "$disk_lvm_home_group" "${home_drives[@]}"
+    disk_lvm_vg "$disk_lvm_root_group" "$root_drives" 
+    disk_lvm_vg "$disk_lvm_home_group" "$home_drives" 
 
     if [[ $interactive_mode = true ]]; then
       read -p "Choose root volume name (eg. proot): " disk_lvm_root_volume
       read -p "Choose home volume name (eg. phome): " disk_lvm_home_volume
     fi
 
-    disk_lvm_lv "$disk_lvm_root_volume" "$disk_lvm_root_group"
-    disk_lvm_lv "$disk_lvm_home_volume" "$disk_lvm_home_group"
+    disk_lvm_lv "$disk_lvm_root_volume" "$disk_lvm_root_group" "$disk_root_size"
+    disk_lvm_lv "$disk_lvm_home_volume" "$disk_lvm_home_group" "$disk_home_size"
 
     root_part=/dev/$disk_lvm_root_group/$disk_lvm_root_volume
     home_part=/dev/$disk_lvm_home_group/$disk_lvm_home_volume
